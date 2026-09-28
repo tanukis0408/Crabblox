@@ -14,24 +14,28 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
     status_page.set_title("Crabblox");
     status_page.set_vexpand(true);
 
-    let ver = updater::installed_version(&paths).unwrap_or_else(|| "не найден".to_string());
+    let ver = updater::installed_version(&paths);
+    let is_installed = ver.is_some();
+    let ver_str = ver.unwrap_or_else(|| "не установлен".to_string());
     let user_str = auth::signed_in_user(&paths).unwrap_or_else(|| "не авторизован".to_string());
     status_page.set_description(Some(&format!(
-        "Roblox {} • Вход выполнен: {}",
-        ver, user_str
+        "Roblox: {} • Вход выполнен: {}",
+        ver_str, user_str
     )));
 
     let controls_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
     controls_box.set_halign(gtk4::Align::Center);
 
-    // Play Button
-    let play_button = gtk4::Button::with_label("Играть");
+    // Play or Install Button
+    let play_button = gtk4::Button::with_label(if is_installed { "Играть" } else { "Установить Roblox" });
     play_button.add_css_class("suggested-action");
     play_button.add_css_class("pill");
     play_button.set_size_request(220, 52);
 
     #[derive(Debug, Clone)]
     enum PlayState {
+        Installing(String),
+        Installed(String),
         Starting,
         Playing,
         Stopped,
@@ -41,11 +45,28 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
     let (tx, rx) = async_channel::bounded::<PlayState>(1);
     let play_btn_rx = play_button.downgrade();
     let win_rx = window.downgrade();
+    let status_page_rx = status_page.downgrade();
+    let paths_rx = paths.clone();
 
     glib::spawn_future_local(async move {
         while let Ok(state) = rx.recv().await {
             if let Some(btn) = play_btn_rx.upgrade() {
                 match state {
+                    PlayState::Installing(msg) => {
+                        btn.set_sensitive(false);
+                        btn.set_label(&msg);
+                    }
+                    PlayState::Installed(ver) => {
+                        btn.set_sensitive(true);
+                        btn.set_label("Играть");
+                        btn.remove_css_class("destructive-action");
+                        btn.add_css_class("suggested-action");
+
+                        if let Some(sp) = status_page_rx.upgrade() {
+                            let u = auth::signed_in_user(&paths_rx).unwrap_or_else(|| "не авторизован".to_string());
+                            sp.set_description(Some(&format!("Roblox: {} • Вход выполнен: {}", ver, u)));
+                        }
+                    }
                     PlayState::Starting => {
                         btn.set_sensitive(false);
                         btn.set_label("Запуск Roblox…");
@@ -58,19 +79,21 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                     }
                     PlayState::Stopped => {
                         btn.set_sensitive(true);
-                        btn.set_label("Играть");
+                        let is_inst = updater::installed_version(&paths_rx).is_some();
+                        btn.set_label(if is_inst { "Играть" } else { "Установить Roblox" });
                         btn.remove_css_class("destructive-action");
                         btn.add_css_class("suggested-action");
                     }
                     PlayState::Failed(err) => {
                         btn.set_sensitive(true);
-                        btn.set_label("Играть");
+                        let is_inst = updater::installed_version(&paths_rx).is_some();
+                        btn.set_label(if is_inst { "Играть" } else { "Установить Roblox" });
                         btn.remove_css_class("destructive-action");
                         btn.add_css_class("suggested-action");
 
                         if let Some(win) = win_rx.upgrade() {
                             let dialog = adw::AlertDialog::new(
-                                Some("Ошибка запуска"),
+                                Some("Ошибка"),
                                 Some(&err),
                             );
                             dialog.add_response("ok", "OK");
@@ -83,7 +106,6 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
     });
 
     let paths_play = paths.clone();
-    let play_btn_weak = play_button.downgrade();
 
     play_button.connect_clicked(move |btn| {
         let p = paths_play.clone();
@@ -94,6 +116,37 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
             btn.set_label("Остановка…");
             std::thread::spawn(|| {
                 runner::stop_roblox();
+            });
+            return;
+        }
+
+        // If Roblox is NOT installed, run install flow!
+        if updater::installed_version(&p).is_none() {
+            btn.set_sensitive(false);
+            btn.set_label("Подключение…");
+            let tx_inst = tx.clone();
+            let p_inst = p.clone();
+
+            std::thread::spawn(move || {
+                let tx_p = tx_inst.clone();
+                let res = (|| -> anyhow::Result<String> {
+                    let _ = tx_inst.send_blocking(PlayState::Installing("Проверка версии…".to_string()));
+                    let (human_ver, upload) = updater::latest_version()?;
+                    updater::update_roblox(&p_inst, &upload, move |frac, _msg| {
+                        let pct = (frac * 100.0) as u32;
+                        let _ = tx_p.send_blocking(PlayState::Installing(format!("Скачивание: {pct}%")));
+                    })?;
+                    Ok(human_ver)
+                })();
+
+                match res {
+                    Ok(ver) => {
+                        let _ = tx_inst.send_blocking(PlayState::Installed(ver));
+                    }
+                    Err(e) => {
+                        let _ = tx_inst.send_blocking(PlayState::Failed(format!("Не удалось установить Roblox:\n{e}")));
+                    }
+                }
             });
             return;
         }

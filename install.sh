@@ -113,7 +113,11 @@ main() {
     (cd "$DIR" && cargo build --release --manifest-path launcher-rs/Cargo.toml && cp launcher-rs/target/release/crabblox "$DIR/crabblox") || true
   fi
   "$DIR/launcher/install.sh"
-  say "Done. Open Crabblox from the app menu or run 'crabblox', press Install Roblox, then Play."
+  if [[ ! -d "$DIR/RobloxPlayer.app" && ! -d "${XDG_DATA_HOME:-$HOME/.local/share}/Crabblox/RobloxPlayer.app" ]]; then
+    say "Downloading official macOS Roblox client..."
+    "$HOME/.local/bin/crabblox" update || true
+  fi
+  say "Done. Open Crabblox from the app menu or run 'crabblox'!"
 }
 
 main "$@"

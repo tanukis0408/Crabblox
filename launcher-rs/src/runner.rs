@@ -294,7 +294,13 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     let app_bundle = paths.app_bundle();
     let binary = app_bundle.join("Contents/MacOS/RobloxPlayer");
     if !binary.exists() {
-        anyhow::bail!("RobloxPlayer binary not found at {:?}", binary);
+        println!("RobloxPlayer not found, downloading latest version...");
+        let (_human_ver, upload) = crate::updater::latest_version()
+            .map_err(|e| anyhow::anyhow!("Не удалось получить информацию о последней версии Roblox: {e}"))?;
+        crate::updater::update_roblox(paths, &upload, |frac, msg| {
+            println!("[{:>3}%] {}", (frac * 100.0) as u32, msg);
+        })
+        .map_err(|e| anyhow::anyhow!("Не удалось скачать и установить Roblox: {e}"))?;
     }
 
     // Clean any stale Darling mounts or state
