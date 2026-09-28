@@ -89,9 +89,7 @@ main() {
       else say "Unknown distribution, install Darling, clang, lld, unzip, PipeWire, PyGObject, GTK 4 and libadwaita yourself"
       fi ;;
   esac
-  for tool in clang ld.lld unzip; do
-    command -v "$tool" >/dev/null || die "$tool is not installed. Install clang, lld and unzip with your package manager and run this again."
-  done
+  command -v unzip >/dev/null || die "unzip is not installed. Install unzip with your package manager and run this again."
   command -v darling >/dev/null ||
     die "Darling is not installed. Build it with https://docs.darlinghq.org/build-instructions.html and run this again."
 
@@ -102,11 +100,18 @@ main() {
     say "Downloading Crabblox"
     git clone --depth 1 "$REPO" "$DIR"
   fi
-  say "Building the Roblox shim"
-  local output
-  if ! output=$("$DIR/build_debug_shim.sh" 2>&1); then
-    printf '%s\n' "$output" >&2
-    die "Could not build the shim."
+
+  if [[ -f "$DIR/prebuilt/libMacOBloxShims.dylib" && ! -f "$DIR/build/libMacOBloxShims.dylib" ]]; then
+    mkdir -p "$DIR/build/frameworks"
+    cp -a "$DIR/prebuilt/libMacOBloxShims.dylib" "$DIR/build/" || true
+    cp -a "$DIR/prebuilt/frameworks"/* "$DIR/build/frameworks/" || true
+  fi
+
+  if command -v clang >/dev/null && command -v ld.lld >/dev/null; then
+    say "Verifying/building the Roblox shim from source"
+    "$DIR/build_debug_shim.sh" || true
+  else
+    say "Using prebuilt Roblox shims and frameworks"
   fi
   if command -v cargo >/dev/null && [[ -d "$DIR/launcher-rs" ]]; then
     say "Building Crabblox Rust launcher (cargo)"

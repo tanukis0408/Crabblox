@@ -4,7 +4,6 @@ use chrono::Local;
 use std::ffi::CString;
 use std::fs;
 use std::os::unix::fs::OpenOptionsExt;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -26,9 +25,13 @@ pub struct HostAudio {
 
 impl HostAudio {
     pub fn start(cache_dir: &std::path::Path) -> Option<Self> {
-        let player_bin = if Command::new("which").arg("pw-cat").output().map(|o| o.status.success()).unwrap_or(false) {
+        let player_bin = if Command::new("pw-cat").arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+            || std::path::Path::new("/usr/bin/pw-cat").exists()
+        {
             "pw-cat"
-        } else if Command::new("which").arg("pacat").output().map(|o| o.status.success()).unwrap_or(false) {
+        } else if Command::new("pacat").arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
+            || std::path::Path::new("/usr/bin/pacat").exists()
+        {
             "pacat"
         } else {
             return None;
@@ -112,8 +115,11 @@ impl Drop for RobloxSession {
 
 pub fn ensure_shim(paths: &Paths) -> anyhow::Result<()> {
     let shim = paths.shim_dylib();
-    let darling_coreml = paths.darling_prefix.join("System/Library/Frameworks/CoreML.framework");
-    let needs_build = !shim.exists() || !darling_coreml.exists();
+    let host_frameworks = paths.project_dir.join("build/frameworks/CoreML.framework").exists()
+        || paths.project_dir.join("prebuilt/frameworks/CoreML.framework").exists()
+        || paths.data_dir.join("build/frameworks/CoreML.framework").exists()
+        || paths.data_dir.join("prebuilt/frameworks/CoreML.framework").exists();
+    let needs_build = !shim.exists() || !host_frameworks;
 
     if needs_build {
         println!("Building libMacOBloxShims.dylib and stub frameworks...");
@@ -138,15 +144,19 @@ pub fn ensure_shim(paths: &Paths) -> anyhow::Result<()> {
 
     for name in frameworks {
         let dest = darling_frameworks.join(format!("{name}.framework"));
-        let src = if paths.project_dir.join(format!("build/frameworks/{name}.framework")).exists() {
-            paths.project_dir.join(format!("build/frameworks/{name}.framework"))
-        } else {
-            paths.data_dir.join(format!("build/frameworks/{name}.framework"))
-        };
-        if src.exists() && !dest.exists() {
-            let _ = Command::new("cp")
-                .args(["-r", src.to_str().unwrap(), dest.to_str().unwrap()])
-                .status();
+        let candidates = [
+            paths.project_dir.join(format!("build/frameworks/{name}.framework")),
+            paths.project_dir.join(format!("prebuilt/frameworks/{name}.framework")),
+            paths.data_dir.join(format!("build/frameworks/{name}.framework")),
+            paths.data_dir.join(format!("prebuilt/frameworks/{name}.framework")),
+        ];
+        let src = candidates.into_iter().find(|p| p.exists());
+        if let Some(src_path) = src {
+            if !dest.exists() {
+                let _ = Command::new("cp")
+                    .args(["-r", src_path.to_str().unwrap(), dest.to_str().unwrap()])
+                    .status();
+            }
         }
     }
 
@@ -294,6 +304,25 @@ pub fn stop_roblox() {
     }
 }
 
+pub fn host_vram_bytes() -> u64 {
+    let mut best = 0u64;
+    if let Ok(entries) = fs::read_dir("/sys/class/drm") {
+        for entry in entries.flatten() {
+            let path = entry.path().join("device/mem_info_vram_total");
+            if let Ok(s) = fs::read_to_string(path) {
+                if let Ok(val) = s.trim().parse::<u64>() {
+                    best = best.max(val);
+                }
+            }
+        }
+    }
+    if best >= (64 << 20) {
+        best
+    } else {
+        4 * 1024 * 1024 * 1024
+    }
+}
+
 pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     ensure_shim(paths)?;
 
@@ -363,6 +392,8 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     let shader_cache = home.join(".cache/mesa_shader_cache");
     let _ = fs::create_dir_all(&shader_cache);
 
+    let vram = host_vram_bytes();
+
     let mut args: Vec<String> = vec![
         "shell".into(),
         "/bin/bash".into(),
@@ -372,6 +403,7 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         darling_app_dir,
         darling_shim_dir,
         format!("MACOBLOX_DNS={}", dns_address),
+        format!("MACOBLOX_VRAM_BYTES={}", vram),
         format!("MESA_SHADER_CACHE_DIR={}", shader_cache.display()),
         "__GL_SHADER_DISK_CACHE=1".into(),
         format!("__GL_SHADER_DISK_CACHE_PATH={}", home.join(".cache").display()),
@@ -410,6 +442,15 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     }
     if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
         cmd.env("XDG_RUNTIME_DIR", runtime_dir);
+    }
+    if let Ok(pulse) = std::env::var("PULSE_SERVER") {
+        cmd.env("PULSE_SERVER", pulse);
+    }
+    if let Ok(dbus) = std::env::var("DBUS_SESSION_BUS_ADDRESS") {
+        cmd.env("DBUS_SESSION_BUS_ADDRESS", dbus);
+    }
+    if let Ok(noroot) = std::env::var("MACOBLOX_NOROOT_LIB") {
+        cmd.env("LD_PRELOAD", noroot);
     }
 
     let child = cmd.spawn()?;

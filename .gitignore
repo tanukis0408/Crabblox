@@ -6,6 +6,9 @@
 /build/
 /studio/
 *.dylib
+!/prebuilt/
+!/prebuilt/*.dylib
+!/prebuilt/**/*.dylib
 __pycache__/
 /launcher-rs/target/
 

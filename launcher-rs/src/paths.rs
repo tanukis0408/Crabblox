@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub struct Paths {
     pub project_dir: PathBuf,
@@ -94,8 +94,14 @@ impl Paths {
             PathBuf::from(shim).join("libMacOBloxShims.dylib")
         } else if self.project_dir.join("build/libMacOBloxShims.dylib").exists() {
             self.project_dir.join("build/libMacOBloxShims.dylib")
-        } else {
+        } else if self.project_dir.join("prebuilt/libMacOBloxShims.dylib").exists() {
+            self.project_dir.join("prebuilt/libMacOBloxShims.dylib")
+        } else if self.data_dir.join("build/libMacOBloxShims.dylib").exists() {
             self.data_dir.join("build/libMacOBloxShims.dylib")
+        } else if self.data_dir.join("prebuilt/libMacOBloxShims.dylib").exists() {
+            self.data_dir.join("prebuilt/libMacOBloxShims.dylib")
+        } else {
+            self.project_dir.join("build/libMacOBloxShims.dylib")
         }
     }
 
