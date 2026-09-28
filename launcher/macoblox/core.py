@@ -406,7 +406,7 @@ def import_browser_cookies():
     import hashlib
     import sqlite3
 
-    # 1. Chromium-based browsers
+    # 1. Chromium-based browsers (native, Flatpak, Snap)
     chromium_browsers = [
         ("Google Chrome", "~/.config/google-chrome"),
         ("Chromium", "~/.config/chromium"),
@@ -414,108 +414,155 @@ def import_browser_cookies():
         ("Vivaldi", "~/.config/vivaldi"),
         ("Microsoft Edge", "~/.config/microsoft-edge"),
         ("Opera", "~/.config/opera"),
+        ("Opera GX", "~/.config/opera-gx"),
         ("Yandex Browser", "~/.config/yandex-browser"),
+        ("Thorium", "~/.config/thorium"),
+        ("Chromium (Snap)", "~/snap/chromium/common/chromium"),
+        ("Chromium (Snap Alt)", "~/snap/chromium/current/.config/chromium"),
         ("Chrome (Flatpak)", "~/.var/app/com.google.Chrome/config/google-chrome"),
         ("Chromium (Flatpak)", "~/.var/app/org.chromium.Chromium/config/chromium"),
         ("Brave (Flatpak)", "~/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"),
+        ("Edge (Flatpak)", "~/.var/app/com.microsoft.Edge/config/microsoft-edge"),
+        ("Vivaldi (Flatpak)", "~/.var/app/com.vivaldi.Vivaldi/config/vivaldi"),
+        ("Opera (Flatpak)", "~/.var/app/com.opera.Opera/config/opera"),
     ]
+
+    passwords = [b"peanuts", b""]
+    for app in ["chrome", "google-chrome", "chromium", "brave", "microsoft-edge", "edge", "opera", "vivaldi", "yandex-browser", "thorium"]:
+        try:
+            p = subprocess.run(["secret-tool", "lookup", "application", app], capture_output=True, text=False, timeout=0.6)
+            if p.returncode == 0 and p.stdout:
+                pwd = p.stdout.strip()
+                if pwd and pwd not in passwords:
+                    passwords.insert(0, pwd)
+        except Exception:
+            pass
 
     for bname, base_dir in chromium_browsers:
         patterns = [
             f"{base_dir}/Default/Cookies",
+            f"{base_dir}/Default/Network/Cookies",
             f"{base_dir}/Profile */Cookies",
+            f"{base_dir}/Profile */Network/Cookies",
             f"{base_dir}/Cookies",
+            f"{base_dir}/Network/Cookies",
         ]
         for pat in patterns:
             for db_path in glob.glob(os.path.expanduser(pat)):
                 if not os.path.exists(db_path):
                     continue
-                tmp = tempfile.mktemp(suffix=".sqlite")
+                temp_dir = tempfile.mkdtemp(prefix="crabblox-chrom-")
+                tmp = os.path.join(temp_dir, "Cookies")
                 try:
                     shutil.copy2(db_path, tmp)
-                    conn = sqlite3.connect(tmp)
+                    for suffix in ["-wal", "-shm", "-journal"]:
+                        aux = db_path + suffix
+                        if os.path.exists(aux):
+                            try:
+                                shutil.copy2(aux, tmp + suffix)
+                            except Exception:
+                                pass
+
+                    conn = sqlite3.connect(tmp, timeout=1.5)
                     cur = conn.cursor()
-                    cur.execute('SELECT encrypted_value FROM cookies WHERE host_key LIKE "%roblox%" AND name = ".ROBLOSECURITY"')
-                    row = cur.fetchone()
-                    conn.close()
-                    if not row or not row[0]:
-                        continue
-                    enc = row[0]
-                    passwords = [b"peanuts"]
                     try:
-                        p = subprocess.run(["secret-tool", "lookup", "application", "chrome"], capture_output=True, text=False)
-                        if p.returncode == 0 and p.stdout:
-                            passwords.insert(0, p.stdout.strip())
+                        cur.execute('SELECT value, encrypted_value FROM cookies WHERE (host_key LIKE "%roblox.com%" OR host_key LIKE "%roblox%") AND name = ".ROBLOSECURITY" ORDER BY last_access_utc DESC, creation_utc DESC')
                     except Exception:
-                        pass
-                    for pwd in passwords:
-                        try:
-                            key = hashlib.pbkdf2_hmac("sha1", pwd, b"saltysalt", 1, 16)
-                            iv = b" " * 16
-                            proc = subprocess.Popen(
-                                ["openssl", "enc", "-d", "-aes-128-cbc", "-K", key.hex(), "-iv", iv.hex()],
-                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
-                            )
-                            out, _ = proc.communicate(enc[3:])
-                            val = out.decode("utf-8", errors="ignore")
-                            idx = val.find("_|WARNING:-DO")
-                            if idx != -1:
-                                cookie = val[idx:]
-                                while cookie and (cookie[-1] in "\r\n\t " or ord(cookie[-1]) < 32 or ord(cookie[-1]) > 126):
-                                    cookie = cookie[:-1]
+                        cur.execute('SELECT value, encrypted_value FROM cookies WHERE (host_key LIKE "%roblox.com%" OR host_key LIKE "%roblox%") AND name = ".ROBLOSECURITY"')
+                    rows = cur.fetchall()
+                    conn.close()
+
+                    for val, enc in rows:
+                        # 1. Plaintext cookie check
+                        if val and isinstance(val, str) and val.strip():
+                            v = val.strip()
+                            if "_|WARNING:-DO" in v or len(v) > 50:
                                 try:
-                                    username = save_session_cookie(cookie)
+                                    username = save_session_cookie(v)
                                     return username, bname
                                 except Exception:
                                     pass
-                        except Exception:
-                            pass
+
+                        # 2. Encrypted cookie check
+                        if enc and isinstance(enc, (bytes, bytearray)) and enc.startswith(b"v10") and len(enc) > 3:
+                            for pwd in passwords:
+                                try:
+                                    key = hashlib.pbkdf2_hmac("sha1", pwd, b"saltysalt", 1, 16)
+                                    iv = b" " * 16
+                                    proc = subprocess.Popen(
+                                        ["openssl", "enc", "-d", "-aes-128-cbc", "-K", key.hex(), "-iv", iv.hex()],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                                    )
+                                    out, _ = proc.communicate(enc[3:])
+                                    text = out.decode("utf-8", errors="ignore")
+                                    idx = text.find("_|WARNING:-DO")
+                                    if idx != -1:
+                                        cookie = text[idx:].strip()
+                                        cookie = cookie.rstrip("\x00\r\n\t ")
+                                        try:
+                                            username = save_session_cookie(cookie)
+                                            return username, bname
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
                 except Exception:
                     pass
                 finally:
-                    if os.path.exists(tmp):
-                        try:
-                            os.remove(tmp)
-                        except OSError:
-                            pass
+                    shutil.rmtree(temp_dir, ignore_errors=True)
 
     # 2. Gecko-based browsers (unencrypted SQLite)
     gecko_patterns = [
         ("Firefox", "~/.mozilla/firefox/*/cookies.sqlite"),
-        ("Zen Browser", "~/.zen/*/cookies.sqlite"),
-        ("Floorp", "~/.floorp/*/cookies.sqlite"),
-        ("LibreWolf", "~/.librewolf/*/cookies.sqlite"),
-        ("Waterfox", "~/.waterfox/*/cookies.sqlite"),
+        ("Firefox (Snap)", "~/snap/firefox/common/.mozilla/firefox/*/cookies.sqlite"),
         ("Firefox (Flatpak)", "~/.var/app/org.mozilla.firefox/.mozilla/firefox/*/cookies.sqlite"),
+        ("Zen Browser", "~/.zen/*/cookies.sqlite"),
+        ("Zen Browser (Flatpak)", "~/.var/app/app.zen_browser.zen/.zen/*/cookies.sqlite"),
+        ("Floorp", "~/.floorp/*/cookies.sqlite"),
+        ("Floorp (Flatpak)", "~/.var/app/one.ablaze.floorp/.floorp/*/cookies.sqlite"),
+        ("LibreWolf", "~/.librewolf/*/cookies.sqlite"),
+        ("LibreWolf (Flatpak)", "~/.var/app/io.gitlab.librewolf-community/.librewolf/*/cookies.sqlite"),
+        ("Waterfox", "~/.waterfox/*/cookies.sqlite"),
     ]
 
     for bname, pat in gecko_patterns:
         for db_path in glob.glob(os.path.expanduser(pat)):
             if not os.path.exists(db_path):
                 continue
-            tmp = tempfile.mktemp(suffix=".sqlite")
+            temp_dir = tempfile.mkdtemp(prefix="crabblox-gecko-")
+            tmp = os.path.join(temp_dir, "cookies.sqlite")
             try:
                 shutil.copy2(db_path, tmp)
-                conn = sqlite3.connect(tmp)
+                for suffix in ["-wal", "-shm", "-journal"]:
+                    aux = db_path + suffix
+                    if os.path.exists(aux):
+                        try:
+                            shutil.copy2(aux, tmp + suffix)
+                        except Exception:
+                            pass
+
+                conn = sqlite3.connect(tmp, timeout=1.5)
                 cur = conn.cursor()
-                cur.execute('SELECT value FROM moz_cookies WHERE host LIKE "%roblox.com" AND name = ".ROBLOSECURITY"')
-                row = cur.fetchone()
+                try:
+                    cur.execute('SELECT value FROM moz_cookies WHERE (host LIKE "%roblox.com" OR host LIKE "%roblox%") AND name = ".ROBLOSECURITY" ORDER BY lastAccessed DESC, creationTime DESC')
+                except Exception:
+                    cur.execute('SELECT value FROM moz_cookies WHERE (host LIKE "%roblox.com" OR host LIKE "%roblox%") AND name = ".ROBLOSECURITY"')
+                rows = cur.fetchall()
                 conn.close()
-                if row and row[0]:
-                    cookie = row[0].strip()
-                    try:
-                        username = save_session_cookie(cookie)
-                        return username, bname
-                    except Exception:
-                        pass
+
+                for row in rows:
+                    if row and row[0]:
+                        cookie = str(row[0]).strip().rstrip("\x00\r\n\t ")
+                        if cookie:
+                            try:
+                                username = save_session_cookie(cookie)
+                                return username, bname
+                            except Exception:
+                                pass
             except Exception:
                 pass
             finally:
-                if os.path.exists(tmp):
-                    try:
-                        os.remove(tmp)
-                    except OSError:
-                        pass
+                shutil.rmtree(temp_dir, ignore_errors=True)
 
     return None, None
 

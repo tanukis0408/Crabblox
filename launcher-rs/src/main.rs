@@ -99,14 +99,14 @@ fn main() -> anyhow::Result<()> {
                 let username = auth::save_session_cookie(&paths, &cookie_val)?;
                 println!("Successfully signed in as '{}'!", username);
             } else if browser || cookie.is_none() {
-                println!("Searching for active Roblox session in Chrome, Firefox, Brave...");
+                println!("Searching for active Roblox session in browsers (Chrome, Chromium, Firefox, Brave, Edge, Opera, Zen...)...");
                 match auth::import_browser_cookies(&paths)? {
                     Some((user, bname)) => {
                         println!("Successfully imported active session for '{}' from {}!", user, bname);
                     }
                     None => {
                         println!("No active Roblox session found in installed browsers.");
-                        println!("Please log in on roblox.com in Chrome or Firefox, or pass --cookie <value>.");
+                        println!("Please log in on roblox.com in your browser, or pass --cookie <value>.");
                     }
                 }
             }

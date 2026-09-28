@@ -602,7 +602,7 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                 Some("Выберите способ входа: импортировать активную сессию из браузера или ввести куки .ROBLOSECURITY вручную.")
             );
 
-            dialog.add_response("browser", "Из браузера (Chrome / Firefox)");
+            dialog.add_response("browser", "Из браузера (Chrome, Firefox, Brave...)");
             dialog.add_response("manual", "Ввести куки вручную");
             dialog.add_response("cancel", "Отмена");
             dialog.set_default_response(Some("browser"));
@@ -626,7 +626,7 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                         Ok(None) => {
                             let err_dialog = adw::AlertDialog::new(
                                 Some("Сессия не найдена"),
-                                Some("Не найдено активных сессий Roblox в браузерах. Сначала авторизуйтесь на roblox.com в Chrome или Firefox.")
+                                Some("Не найдено активных сессий Roblox. Убедитесь, что вы авторизованы на roblox.com в вашем браузере (Chrome, Chromium, Firefox, Brave, Edge, Opera, Zen и др.), либо введите куки вручную.")
                             );
                             err_dialog.add_response("ok", "Понятно");
                             err_dialog.present(Some(&win_resp));

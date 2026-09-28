@@ -155,7 +155,7 @@ pub fn build_settings_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -
                 Ok(None) => {
                     let d = adw::AlertDialog::new(
                         Some("Сессия не найдена"),
-                        Some("Войдите на roblox.com в браузере и повторите попытку.")
+                        Some("Не найдено активных сессий Roblox. Убедитесь, что вы авторизованы на roblox.com в браузере (Chrome, Chromium, Firefox, Brave, Edge, Opera, Zen и др.).")
                     );
                     d.add_response("ok", "Понятно");
                     d.present(Some(&w));
