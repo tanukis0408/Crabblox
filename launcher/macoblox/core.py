@@ -1,6 +1,7 @@
 """Backend of the Mac O’ Blox launcher: paths, settings, fast flags, Roblox
 updates and running the macOS client through Darling. No GTK here."""
 
+import datetime
 import json
 import os
 import plistlib
@@ -63,6 +64,7 @@ SESSION_FILES = [
     DARLING_HOME / "Library" / "MacOBlox" / "Cookies.plist",
     DARLING_HOME / "Library" / "MacOBlox" / "Keychain",
 ]
+USER_CACHE_FILE = CACHE_DIR / "user.json"
 
 VERSION_URL = "https://clientsettingscdn.roblox.com/v2/client-version/MacPlayer"
 DOWNLOAD_URL = "https://setup.rbxcdn.com/mac/{upload}-RobloxPlayer.zip"
@@ -166,42 +168,81 @@ def update_roblox(upload, progress=None):
     The previous bundle is moved to backups/. progress(fraction, text)."""
     DOWNLOADS.mkdir(parents=True, exist_ok=True)
     archive = DOWNLOADS / f"{upload}-RobloxPlayer.zip"
-    request = urllib.request.Request(DOWNLOAD_URL.format(upload=upload),
-                                     headers={"User-Agent": "MacOBlox"})
-    with urllib.request.urlopen(request, timeout=30) as response, open(archive, "wb") as out:
-        total = int(response.headers.get("Content-Length") or 0)
-        done = 0
-        while chunk := response.read(1 << 16):
-            out.write(chunk)
-            done += len(chunk)
-            if progress and total:
-                progress(done / total * 0.9, _("Downloading {done} of {total} MB",
-                                                  done=done >> 20, total=total >> 20))
-    if not zipfile.is_zipfile(archive):
-        raise RuntimeError(_("The download is not a zip archive"))
+    part = archive.with_suffix(".zip.part")
+
+    # Only download if archive is missing or invalid
+    need_download = True
+    if archive.exists():
+        try:
+            with zipfile.ZipFile(archive) as z:
+                if z.testzip() is None:
+                    need_download = False
+        except Exception:
+            archive.unlink(missing_ok=True)
+
+    if need_download:
+        url = DOWNLOAD_URL.format(upload=upload)
+        for attempt in range(3):
+            try:
+                request = urllib.request.Request(url, headers={"User-Agent": "MacOBlox"})
+                with urllib.request.urlopen(request, timeout=30) as response, open(part, "wb") as out:
+                    total = int(response.headers.get("Content-Length") or 0)
+                    done = 0
+                    while chunk := response.read(1 << 16):
+                        out.write(chunk)
+                        done += len(chunk)
+                        if progress and total:
+                            progress(done / total * 0.9, _("Downloading {done} of {total} MB",
+                                                              done=done >> 20, total=total >> 20))
+                if total and done < total:
+                    raise RuntimeError(f"Download incomplete: {done}/{total} bytes")
+                if not zipfile.is_zipfile(part):
+                    raise RuntimeError(_("The download is not a zip archive"))
+                part.rename(archive)
+                break
+            except Exception:
+                part.unlink(missing_ok=True)
+                if attempt == 2:
+                    raise
+
     if progress:
         progress(0.92, _("Unpacking"))
     unpack = Path(tempfile.mkdtemp(prefix="unpack-", dir=DOWNLOADS))
-    # unzip keeps the executable bits, zipfile does not.
-    subprocess.run(["unzip", "-q", str(archive), "-d", str(unpack)], check=True)
-    new_bundle = unpack / "RobloxPlayer.app"
-    if not new_bundle.is_dir():
-        raise RuntimeError(_("The archive has no RobloxPlayer.app"))
-    flags = load_fast_flags()
-    old_version = installed_version() or "unknown"
-    BACKUPS.mkdir(parents=True, exist_ok=True)
-    backup = BACKUPS / f"RobloxPlayer-{old_version}.app"
-    if backup.exists():
-        shutil.rmtree(backup)
-    if APP_BUNDLE.exists():
-        APP_BUNDLE.rename(backup)
-    new_bundle.rename(APP_BUNDLE)
-    shutil.rmtree(unpack, ignore_errors=True)
-    if flags:
-        save_fast_flags(flags)
-    if progress:
-        progress(1.0, _("Done"))
-    return backup
+    try:
+        # unzip keeps executable bits
+        res = subprocess.run(["unzip", "-q", "-o", str(archive), "-d", str(unpack)], capture_output=True)
+        new_bundle = unpack / "RobloxPlayer.app"
+        binary = new_bundle / "Contents" / "MacOS" / "RobloxPlayer"
+        if res.returncode not in (0, 1) or not binary.exists():
+            # Fallback to python zipfile extraction preserving permissions
+            with zipfile.ZipFile(archive) as z:
+                for info in z.infolist():
+                    z.extract(info, unpack)
+                    mode = info.external_attr >> 16
+                    if mode:
+                        try:
+                            (unpack / info.filename).chmod(mode)
+                        except OSError:
+                            pass
+
+        if not new_bundle.is_dir():
+            raise RuntimeError(_("The archive has no RobloxPlayer.app"))
+        flags = load_fast_flags()
+        old_version = installed_version() or "unknown"
+        BACKUPS.mkdir(parents=True, exist_ok=True)
+        backup = BACKUPS / f"RobloxPlayer-{old_version}.app"
+        if backup.exists():
+            shutil.rmtree(backup)
+        if APP_BUNDLE.exists():
+            APP_BUNDLE.rename(backup)
+        new_bundle.rename(APP_BUNDLE)
+        if flags:
+            save_fast_flags(flags)
+        if progress:
+            progress(1.0, _("Done"))
+        return backup
+    finally:
+        shutil.rmtree(unpack, ignore_errors=True)
 
 
 # ----------------------------------------------------------------- processes
@@ -274,6 +315,211 @@ def signed_in():
                for c in cookies if isinstance(cookies, list))
 
 
+def signed_in_user():
+    """Returns the username of the signed-in user from cache, or None."""
+    if not signed_in():
+        return None
+    try:
+        data = json.loads(USER_CACHE_FILE.read_text())
+        return data.get("name") or data.get("displayName")
+    except (OSError, ValueError):
+        return None
+
+
+def save_session_cookie(cookie_value):
+    """Save a Roblox .ROBLOSECURITY cookie to Darling's Cookies.plist after validating it."""
+    cookie_value = cookie_value.strip().strip('"').strip("'")
+    if ".ROBLOSECURITY=" in cookie_value:
+        cookie_value = cookie_value.split(".ROBLOSECURITY=", 1)[1].split(";", 1)[0].strip()
+
+    if not cookie_value:
+        raise ValueError(_("Cookie is empty"))
+
+    # Verify cookie with Roblox API
+    req = urllib.request.Request(
+        "https://users.roblox.com/v1/users/authenticated",
+        headers={"Cookie": f".ROBLOSECURITY={cookie_value}", "User-Agent": "MacOBlox/Linux"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            user_data = json.loads(resp.read().decode())
+    except urllib.error.HTTPError as err:
+        if err.code == 401:
+            raise ValueError(_("Invalid cookie: Roblox rejected the authentication token."))
+        raise RuntimeError(_("Roblox API returned error {code}", code=err.code))
+    except Exception as err:
+        raise RuntimeError(_("Could not connect to Roblox: {err}", err=str(err)))
+
+    username = user_data.get("name") or user_data.get("displayName") or "Roblox User"
+    user_id = user_data.get("id")
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    try:
+        USER_CACHE_FILE.write_text(json.dumps({"name": username, "id": user_id}, indent=2))
+    except OSError:
+        pass
+
+    if darlingserver_running():
+        restart_darling()
+
+    cookie_file = SESSION_FILES[0]
+    cookie_file.parent.mkdir(parents=True, exist_ok=True)
+
+    cookies = []
+    if cookie_file.exists():
+        try:
+            with open(cookie_file, "rb") as f:
+                cookies = plistlib.load(f)
+        except Exception:
+            cookies = []
+        if not isinstance(cookies, list):
+            cookies = []
+
+    cookies = [c for c in cookies if isinstance(c, dict) and c.get("Name") != ".ROBLOSECURITY"]
+    expires = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=3650)
+    cookies.append({
+        "Domain": ".roblox.com",
+        "Path": "/",
+        "Name": ".ROBLOSECURITY",
+        "Value": cookie_value,
+        "Expires": expires,
+        "Secure": True,
+    })
+
+    with open(cookie_file, "wb") as f:
+        plistlib.dump(cookies, f)
+    try:
+        cookie_file.chmod(0o600)
+    except OSError:
+        pass
+
+    return username
+
+
+def import_browser_cookies():
+    """Look for an active Roblox session (.ROBLOSECURITY) in installed browsers
+    (Chrome, Chromium, Brave, Vivaldi, Edge, Firefox, Zen, Floorp, LibreWolf, etc.).
+    If found and valid, saves it to Cookies.plist and returns (username, browser_name).
+    Otherwise returns (None, None).
+    """
+    import glob
+    import hashlib
+    import sqlite3
+
+    # 1. Chromium-based browsers
+    chromium_browsers = [
+        ("Google Chrome", "~/.config/google-chrome"),
+        ("Chromium", "~/.config/chromium"),
+        ("Brave", "~/.config/BraveSoftware/Brave-Browser"),
+        ("Vivaldi", "~/.config/vivaldi"),
+        ("Microsoft Edge", "~/.config/microsoft-edge"),
+        ("Opera", "~/.config/opera"),
+        ("Yandex Browser", "~/.config/yandex-browser"),
+        ("Chrome (Flatpak)", "~/.var/app/com.google.Chrome/config/google-chrome"),
+        ("Chromium (Flatpak)", "~/.var/app/org.chromium.Chromium/config/chromium"),
+        ("Brave (Flatpak)", "~/.var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser"),
+    ]
+
+    for bname, base_dir in chromium_browsers:
+        patterns = [
+            f"{base_dir}/Default/Cookies",
+            f"{base_dir}/Profile */Cookies",
+            f"{base_dir}/Cookies",
+        ]
+        for pat in patterns:
+            for db_path in glob.glob(os.path.expanduser(pat)):
+                if not os.path.exists(db_path):
+                    continue
+                tmp = tempfile.mktemp(suffix=".sqlite")
+                try:
+                    shutil.copy2(db_path, tmp)
+                    conn = sqlite3.connect(tmp)
+                    cur = conn.cursor()
+                    cur.execute('SELECT encrypted_value FROM cookies WHERE host_key LIKE "%roblox%" AND name = ".ROBLOSECURITY"')
+                    row = cur.fetchone()
+                    conn.close()
+                    if not row or not row[0]:
+                        continue
+                    enc = row[0]
+                    passwords = [b"peanuts"]
+                    try:
+                        p = subprocess.run(["secret-tool", "lookup", "application", "chrome"], capture_output=True, text=False)
+                        if p.returncode == 0 and p.stdout:
+                            passwords.insert(0, p.stdout.strip())
+                    except Exception:
+                        pass
+                    for pwd in passwords:
+                        try:
+                            key = hashlib.pbkdf2_hmac("sha1", pwd, b"saltysalt", 1, 16)
+                            iv = b" " * 16
+                            proc = subprocess.Popen(
+                                ["openssl", "enc", "-d", "-aes-128-cbc", "-K", key.hex(), "-iv", iv.hex()],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+                            )
+                            out, _ = proc.communicate(enc[3:])
+                            val = out.decode("utf-8", errors="ignore")
+                            idx = val.find("_|WARNING:-DO")
+                            if idx != -1:
+                                cookie = val[idx:]
+                                while cookie and (cookie[-1] in "\r\n\t " or ord(cookie[-1]) < 32 or ord(cookie[-1]) > 126):
+                                    cookie = cookie[:-1]
+                                try:
+                                    username = save_session_cookie(cookie)
+                                    return username, bname
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                finally:
+                    if os.path.exists(tmp):
+                        try:
+                            os.remove(tmp)
+                        except OSError:
+                            pass
+
+    # 2. Gecko-based browsers (unencrypted SQLite)
+    gecko_patterns = [
+        ("Firefox", "~/.mozilla/firefox/*/cookies.sqlite"),
+        ("Zen Browser", "~/.zen/*/cookies.sqlite"),
+        ("Floorp", "~/.floorp/*/cookies.sqlite"),
+        ("LibreWolf", "~/.librewolf/*/cookies.sqlite"),
+        ("Waterfox", "~/.waterfox/*/cookies.sqlite"),
+        ("Firefox (Flatpak)", "~/.var/app/org.mozilla.firefox/.mozilla/firefox/*/cookies.sqlite"),
+    ]
+
+    for bname, pat in gecko_patterns:
+        for db_path in glob.glob(os.path.expanduser(pat)):
+            if not os.path.exists(db_path):
+                continue
+            tmp = tempfile.mktemp(suffix=".sqlite")
+            try:
+                shutil.copy2(db_path, tmp)
+                conn = sqlite3.connect(tmp)
+                cur = conn.cursor()
+                cur.execute('SELECT value FROM moz_cookies WHERE host LIKE "%roblox.com" AND name = ".ROBLOSECURITY"')
+                row = cur.fetchone()
+                conn.close()
+                if row and row[0]:
+                    cookie = row[0].strip()
+                    try:
+                        username = save_session_cookie(cookie)
+                        return username, bname
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+            finally:
+                if os.path.exists(tmp):
+                    try:
+                        os.remove(tmp)
+                    except OSError:
+                        pass
+
+    return None, None
+
+
 def exit_reason(log_path):
     """A known cause for a game that quit, from its log, or None.
     "captcha": Roblox tried to show its web view (captcha on sign-up or
@@ -293,6 +539,10 @@ def exit_reason(log_path):
 def logout():
     # Files inside ~/.darling must not be removed from the host while
     # darlingserver runs: its overlay then stops showing new files to the host.
+    try:
+        USER_CACHE_FILE.unlink(missing_ok=True)
+    except OSError:
+        pass
     if darlingserver_running():
         subprocess.run(["darling", "shell", "/bin/rm", "-rf",
                         *[_darling_path(path) for path in SESSION_FILES]],
@@ -508,7 +758,9 @@ def restart_darling():
 def icon_argb_file():
     """Write the logo in _NET_WM_ICON layout for the shim (see MACOBLOX_ICON_ARGB)."""
     target = CACHE_DIR / "icon.argb"
-    sources = [ICONS / f"macoblox-{size}.png" for size in (32, 64, 128)]
+    sources = [ICONS / f"crabblox-{size}.png" for size in (32, 64, 128)]
+    if not any(s.exists() for s in sources):
+        sources = [ICONS / f"macoblox-{size}.png" for size in (32, 64, 128)]
     if target.exists() and all(target.stat().st_mtime >= s.stat().st_mtime for s in sources if s.exists()):
         return target
     from gi.repository import GdkPixbuf  # only needed here
@@ -536,6 +788,10 @@ def icon_argb_file():
 LAUNCH_SCRIPT = r'''
 project=$1 shim_dir=$2; shift 2
 for kv in "$@"; do export "$kv"; done
+export MESA_SHADER_CACHE_DIR="/home/tanukis/.cache/mesa_shader_cache"
+export __GL_SHADER_DISK_CACHE=1
+export __GL_SHADER_DISK_CACHE_PATH="/home/tanukis/.cache"
+export mesa_glthread=true
 app="$project/RobloxPlayer.app/Contents/MacOS"
 cd "$app" || exit 1
 # Nothing may run between these exports and exec: every program started
@@ -567,7 +823,7 @@ class HostAudio:
     keeps the FIFO open read/write for the whole session, so pw-cat never
     sees end of file and the game can reopen it any time."""
 
-    NAME = "Roblox (Mac O’ Blox)"
+    NAME = "Roblox (Crabblox)"
 
     def __init__(self, fifo, keep, player):
         self.fifo, self.keep, self.player = fifo, keep, player
@@ -684,7 +940,7 @@ class RobloxSession:
         cleanup_logs(int(self.settings.get("keep_logs", 30)) - 1)
         self.log_path = LOGS / time.strftime("launch-%Y%m%d-%H%M%S.log")
         log = open(self.log_path, "wb")
-        log.write(f"Mac O’ Blox {__version__}\n".encode())
+        log.write(f"Crabblox {__version__} by Monster Dev\n".encode())
         log.flush()
         command = ["darling", "shell", "/bin/bash", "-c", LAUNCH_SCRIPT, "macoblox",
                    f"/Volumes/SystemRoot{DATA_DIR}", f"/Volumes/SystemRoot{SHIM.parent}",

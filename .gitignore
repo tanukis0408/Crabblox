@@ -7,6 +7,7 @@
 /studio/
 *.dylib
 __pycache__/
+/launcher-rs/target/
 
 # Local experiments and history
 /work/

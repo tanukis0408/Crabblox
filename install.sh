@@ -2,15 +2,15 @@
 # Mac O' Blox installer: Darling, the tools the launcher needs, and the
 # launcher itself with its app menu entry. Run it again to update.
 #
-#   curl -fsSL https://raw.githubusercontent.com/narezy/MacOBlox/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/tanukis0408/Crabblox/main/install.sh | bash
 #
 # Everything runs inside main(), called on the last line, so a download cut
 # off halfway does nothing.
 
 set -euo pipefail
 
-REPO=https://github.com/narezy/MacOBlox.git
-DIR=${XDG_DATA_HOME:-$HOME/.local/share}/MacOBlox
+REPO=https://github.com/tanukis0408/Crabblox.git
+DIR=${XDG_DATA_HOME:-$HOME/.local/share}/Crabblox
 
 say() { printf '\033[1;35m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31mError:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -96,20 +96,24 @@ main() {
     die "Darling is not installed. Build it with https://docs.darlinghq.org/build-instructions.html and run this again."
 
   if [[ -d $DIR/.git ]]; then
-    say "Updating Mac O' Blox"
+    say "Updating Crabblox"
     git -C "$DIR" pull --ff-only
   else
-    say "Downloading Mac O' Blox"
+    say "Downloading Crabblox"
     git clone --depth 1 "$REPO" "$DIR"
   fi
   say "Building the Roblox shim"
   local output
   if ! output=$("$DIR/build_debug_shim.sh" 2>&1); then
     printf '%s\n' "$output" >&2
-    die "Could not build the shim. Send the text above to the Discord: https://discord.gg/bpX9rTttCa"
+    die "Could not build the shim."
+  fi
+  if command -v cargo >/dev/null && [[ -d "$DIR/launcher-rs" && ! -f "$DIR/crabblox" ]]; then
+    say "Building Crabblox Rust launcher"
+    (cd "$DIR" && cargo build --release --manifest-path launcher-rs/Cargo.toml && cp launcher-rs/target/release/crabblox "$DIR/crabblox") || true
   fi
   "$DIR/launcher/install.sh"
-  say "Done. Open Mac O' Blox from the app menu, press Install Roblox, then Play."
+  say "Done. Open Crabblox from the app menu or run 'crabblox', press Install Roblox, then Play."
 }
 
 main "$@"

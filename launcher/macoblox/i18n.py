@@ -25,7 +25,37 @@ RU = {
     "Install these first: {programs}": "Сначала установи: {programs}",
     "Close": "Закрыть",
     "Install Roblox": "Установить Roblox",
+    "Sign in to Roblox": "Войти в аккаунт Roblox",
     "Sign in with Quick Login": "Входи через Quick Login",
+    "Sign in with Quick Login or Cookie": "Входи через Quick Login или Cookie",
+    "Signed in as {user}": "Вход выполнен: {user}",
+    "Signed in as {user}!": "Вход выполнен: {user}!",
+    "Signed in": "Вход выполнен",
+    "Session saved in Cookies.plist": "Сессия сохранена в Cookies.plist",
+    "Sign in with Cookie (.ROBLOSECURITY)": "Войти по Cookie (.ROBLOSECURITY)",
+    "Sign in": "Войти",
+    "Sign in from Browser (Chrome / Firefox / Brave)": "Войти через браузер (Chrome / Firefox / Brave)",
+    "Searching for active browser session…": "Поиск активной сессии в браузерах…",
+    "Signed in as {user} from {browser}!": "Вход выполнен: {user} ({browser})!",
+    "No active session found in browsers. Log into roblox.com in Chrome/Firefox first.": "Активная сессия не найдена в браузерах. Сначала войдите на roblox.com в Chrome или Firefox.",
+    "Or enter cookie manually (.ROBLOSECURITY)": "Или введите cookie вручную (.ROBLOSECURITY)",
+    "Sign in in 1 click from your browser, paste your .ROBLOSECURITY cookie, or use Quick Login.":
+        "Войдите в 1 клик через браузер, вставьте cookie .ROBLOSECURITY или используйте Quick Login.",
+    "Paste your .ROBLOSECURITY cookie from your browser, or use Quick Login.":
+        "Вставь cookie .ROBLOSECURITY из браузера или используй Quick Login.",
+    "Cookie (.ROBLOSECURITY)": "Cookie (.ROBLOSECURITY)",
+    "Value": "Значение",
+    "How to get cookie: in browser where you are logged in, press F12 → Application/Storage → Cookies → roblox.com → copy .ROBLOSECURITY":
+        "Как получить cookie: в браузере, где выполнен вход, нажми F12 → Application (Хранилище) → Cookies → roblox.com → скопируй .ROBLOSECURITY",
+    "Or use Quick Login (via game)": "Или используй Quick Login (через игру)",
+    "1. Launch Roblox by pressing Play.\n2. In Roblox, click 'Quick Log In' to see a 6-letter code.\n3. Open roblox.com/crossdevice on your phone or browser and confirm the code.":
+        "1. Запусти Roblox через кнопку Играть.\n2. В игре нажми Quick Log In и посмотри 6-значный код.\n3. Открой roblox.com/crossdevice на телефоне или в браузере и подтверди код.",
+    "Open roblox.com/crossdevice": "Открыть roblox.com/crossdevice",
+    "Cookie is empty": "Поле cookie пустое",
+    "Invalid cookie: Roblox rejected the authentication token.":
+        "Неверная cookie: Roblox отклонил токен авторизации.",
+    "Roblox API returned error {code}": "API Roblox вернул ошибку {code}",
+    "Could not connect to Roblox: {err}": "Не удалось подключиться к Roblox: {err}",
     "Roblox closed at the captcha": "Roblox закрылся на капче",
     "Signing up and signing in with a password show a captcha in a built-in browser, "
     "which does not work here yet. Create the account on roblox.com, then sign in "
@@ -38,9 +68,9 @@ RU = {
     "Roblox Studio": "Roblox Studio",
     "Roblox Studio is already running": "Roblox Studio уже запущен",
     "Install Roblox Studio?": "Установить Roblox Studio?",
-    "Studio runs in its Windows version through Wine. Mac O’ Blox downloads Wine, "
+    "Studio runs in its Windows version through Wine. Crabblox downloads Wine, "
     "DXVK and Studio, about 800 MB.":
-        "Studio запускается в Windows-версии через Wine. Mac O’ Blox скачает Wine, "
+        "Studio запускается в Windows-версии через Wine. Crabblox скачает Wine, "
         "DXVK и Studio, это около 800 МБ.",
     "Install": "Установить",
     "Could not start Roblox Studio": "Не удалось запустить Roblox Studio",
@@ -150,18 +180,20 @@ RU = {
     "Restart Darling": "Перезапустить Darling",
     "Darling stopped, it starts with the next game": "Darling остановлен, запустится при следующей игре",
     # Info
-    "Mac O’ Blox runs the real Roblox client for macOS on Linux through Darling. "
+    "Crabblox runs the real Roblox client for macOS on Linux through Darling. "
     "It is not made by Roblox and is not affiliated with it.":
-        "Mac O’ Blox запускает настоящий клиент Roblox для macOS на Linux через Darling. "
-        "Его делает не Roblox, и с Roblox он никак не связан.",
+        "Crabblox запускает настоящий клиент Roblox для macOS на Linux через Darling. "
+        "Проект разрабатывается Monster Dev и никак не связан с Roblox.",
     "Community": "Сообщество",
-    "Author": "Автор",
+    "Developers": "Разработчики",
+    "Monster Dev team": "Команда Monster Dev",
+    "Author": "Разработчики",
     "{user} on Roblox": "{user} в Roblox",
-    "Made with Claude Opus 5.5": "Сделано с Claude Opus 5.5",
-    "Anthropic's AI wrote the code together with the author": "ИИ от Anthropic писал код вместе с автором",
     "Support the project": "Поддержать проект",
+    "Crabblox is free. Developed by Monster Dev.":
+        "Crabblox бесплатный проект. Разработка Monster Dev.",
     "Mac O’ Blox is free. If it helped you, you can thank the author.":
-        "Mac O’ Blox бесплатный. Если он тебе пригодился, можно поблагодарить автора.",
+        "Crabblox бесплатный. Если он тебе пригодился, можно поддержать авторов.",
     "Boosty": "Boosty",
     "Cards from any country": "Карты любых стран",
     "YooMoney": "ЮMoney",

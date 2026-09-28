@@ -4023,13 +4023,21 @@ static void macoblox_remember_cookie(id cookie, int deleted) {
     id expires = MSG0(id, cookie, "expiresDate");
     id now = MSG0(id, objc_getClass("NSDate"), "date");
     int persistent = expires && MSG1(long, expires, "compare:", now) == 1;
+    int is_security = name && MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY"));
+    if (is_security) {
+        persistent = 1;
+        if (!expires) {
+            expires = ((id (*)(id, SEL, double))objc_msgSend)(
+                now, sel_registerName("dateByAddingTimeInterval:"), 10.0 * 365.0 * 86400.0);
+        }
+    }
     write_str("[MacOBlox Cookies] ");
     write_str(deleted ? "delete " : "set ");
     write_str(name ? MSG0(const char*, name, "UTF8String") : "?");
     write_str(" domain=");
     write_str(domain ? MSG0(const char*, domain, "UTF8String") : "?");
     write_str(deleted ? "\n" : (persistent ? " persistent\n" : " session\n"));
-    if (deleted || !persistent) {
+    if ((deleted && !is_security) || (!persistent && !is_security)) {
         MSG1(void, macoblox_saved_cookies, "removeObjectForKey:", key);
     } else {
         id entry = MSG0(id, objc_getClass("NSMutableDictionary"), "dictionary");
@@ -4096,7 +4104,8 @@ static id hooked_cookie_storage_for_url(id self, SEL cmd, id url) {
         if (MSG1(MacOBloxBool, present, "containsObject:", name))
             continue;
         id expires = MSG1(id, entry, "objectForKey:", macoblox_nsstring("Expires"));
-        if (expires && MSG1(long, expires, "compare:", now) != 1)
+        int is_security = name && MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY"));
+        if (!is_security && expires && MSG1(long, expires, "compare:", now) != 1)
             continue;
         id domain = MSG0(id, MSG1(id, entry, "objectForKey:", macoblox_nsstring("Domain")), "lowercaseString");
         id bare = MSG1(MacOBloxBool, domain, "hasPrefix:", macoblox_nsstring("."))
@@ -4132,7 +4141,9 @@ static void macoblox_load_cookies(void) {
     for (unsigned long index = 0; index < count; index++) {
         id entry = ((id (*)(id, SEL, unsigned long))objc_msgSend)(entries, sel_registerName("objectAtIndex:"), index);
         id expires = MSG1(id, entry, "objectForKey:", macoblox_nsstring("Expires"));
-        if (expires && MSG1(long, expires, "compare:", now) != 1 /* NSOrderedDescending */)
+        id name = MSG1(id, entry, "objectForKey:", macoblox_nsstring("Name"));
+        int is_security = name && MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY"));
+        if (!is_security && expires && MSG1(long, expires, "compare:", now) != 1 /* NSOrderedDescending */)
             continue;
         id cookie = MSG1(id, objc_getClass("NSHTTPCookie"), "cookieWithProperties:", entry);
         if (cookie) {
@@ -4173,8 +4184,15 @@ static id shared_current_display(id cls, SEL cmd) {
     return macoblox_shared_display;
 }
 
+extern const char* getprogname(void);
+extern char* strstr(const char*, const char*);
+
 __attribute__((constructor))
 static void install_swizzles(void) {
+    const char *prog = getprogname();
+    if (prog && strstr(prog, "CrashHandler")) {
+        return;
+    }
     write_str("[MacOBlox] libMacOBloxShims loaded.\n");
     long slide = _dyld_get_image_vmaddr_slide(0);
     write_str("[MacOBlox] Main executable ASLR slide: ");

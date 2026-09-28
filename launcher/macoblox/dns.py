@@ -11,6 +11,7 @@ import ssl
 import struct
 import threading
 import time
+import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 PROVIDERS = {
@@ -18,6 +19,92 @@ PROVIDERS = {
     "cloudflare": ("1.1.1.1", "cloudflare-dns.com"),
     "google": ("8.8.8.8", "dns.google"),
 }
+
+
+ROBLOX_EDGE_IPS = ["128.116.5.3", "128.116.21.3", "128.116.115.3"]
+
+
+def _extract_qname_and_type(query):
+    try:
+        offset = 12
+        labels = []
+        while offset < len(query):
+            length = query[offset]
+            if length == 0:
+                break
+            offset += 1
+            labels.append(query[offset:offset + length].decode(errors="ignore"))
+            offset += length
+        qname = ".".join(labels).lower()
+        offset += 1
+        if offset + 4 <= len(query):
+            qtype, _ = struct.unpack(">HH", query[offset:offset + 4])
+            return qname, qtype
+        return qname, 1
+    except Exception:
+        return "", 1
+
+
+def _make_a_response(query, ips):
+    tx_id = query[:2]
+    flags = b"\x81\x80"
+    counts = struct.pack(">HHHH", 1, len(ips), 0, 0)
+    offset = 12
+    while offset < len(query) and query[offset] != 0:
+        offset += query[offset] + 1
+    offset += 1 + 4
+    question = query[12:offset]
+    answers = b""
+    for ip in ips:
+        answers += b"\xc0\x0c" + struct.pack(">HHIH", 1, 1, 300, 4) + socket.inet_aton(ip)
+    return tx_id + flags + counts + question + answers
+
+
+def _make_empty_response(query):
+    tx_id = query[:2]
+    flags = b"\x81\x80"
+    counts = b"\x00\x01\x00\x00\x00\x00\x00\x00"
+    offset = 12
+    while offset < len(query) and query[offset] != 0:
+        offset += query[offset] + 1
+    offset += 1 + 4
+    return tx_id + flags + counts + query[12:offset]
+
+
+def _sanitize_response(response):
+    """Rewrite any blocked Cloudflare IP addresses in answers for Roblox domains to direct edge IPs."""
+    try:
+        answers = struct.unpack(">H", response[6:8])[0]
+        offset = 12
+
+        def skip_name(pos):
+            while pos < len(response):
+                length = response[pos]
+                if length == 0:
+                    return pos + 1
+                if (length & 0xC0) == 0xC0:
+                    return pos + 2
+                pos += length + 1
+            return pos
+
+        offset = skip_name(offset) + 4
+        resp_bytes = bytearray(response)
+        modified = False
+        for _ in range(answers):
+            offset = skip_name(offset)
+            if offset + 10 > len(resp_bytes):
+                break
+            _type, _class, ttl, length = struct.unpack(">HHIH", resp_bytes[offset:offset + 10])
+            offset += 10
+            if _type == 1 and length == 4 and offset + 4 <= len(resp_bytes):
+                ip = socket.inet_ntoa(resp_bytes[offset:offset + 4])
+                if ip.startswith("104.") or ip.startswith("172.6") or ip.startswith("172.7"):
+                    resp_bytes[offset:offset + 4] = socket.inet_aton("128.116.5.3")
+                    modified = True
+            offset += length
+        return bytes(resp_bytes) if modified else response
+    except Exception:
+        return response
 
 
 def _min_ttl(response):
@@ -90,6 +177,18 @@ class DnsForwarder:
         self.socket.close()
 
     def _answer(self, query, client):
+        qname, qtype = _extract_qname_and_type(query)
+        if qname == "auth.roblox.com":
+            if qtype == 1:
+                response = _make_a_response(query, ROBLOX_EDGE_IPS)
+            else:
+                response = _make_empty_response(query)
+            try:
+                self.socket.sendto(response, client)
+            except OSError:
+                pass
+            return
+
         key = query[2:]
         now = time.time()
         with self.cache_lock:
@@ -100,6 +199,7 @@ class DnsForwarder:
             response = self._resolve(query)
             if not response:
                 return
+            response = _sanitize_response(response)
             ttl = _min_ttl(response)
             ttl = 30 if ttl is None else max(30, min(ttl, 600))
             with self.cache_lock:
@@ -109,9 +209,30 @@ class DnsForwarder:
         except OSError:
             pass
 
+    def _resolve_doh(self, query):
+        if not self.tls_name:
+            return None
+        url = f"https://{self.tls_name}/dns-query"
+        req = urllib.request.Request(
+            url,
+            data=query,
+            headers={"Content-Type": "application/dns-message", "Accept": "application/dns-message", "User-Agent": "MacOBlox"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                data = resp.read()
+                if len(data) >= 12 and data[:2] == query[:2]:
+                    return data
+        except Exception:
+            pass
+        return None
+
     def _resolve(self, query):
         if self.tls_name:
-            return self._resolve_tls(query)
+            res = self._resolve_tls(query)
+            if res:
+                return res
+            return self._resolve_doh(query)
         return self._resolve_udp(query)
 
     def _resolve_udp(self, query):
@@ -128,7 +249,7 @@ class DnsForwarder:
         return None
 
     def _connect(self):
-        raw = socket.create_connection((self.server, self.port), timeout=5)
+        raw = socket.create_connection((self.server, self.port), timeout=2)
         return self.context.wrap_socket(raw, server_hostname=self.tls_name)
 
     @staticmethod
@@ -164,19 +285,40 @@ class DnsForwarder:
         return None
 
 
-def resolve_a(host, provider="quad9", timeout=5):
-    """IPv4 addresses of `host` from one DNS-over-TLS query, for the
+def resolve_a(host, provider="quad9", timeout=3):
+    """IPv4 addresses of `host` from one DNS-over-TLS query (with DoH fallback), for the
     launcher's own downloads when the system resolver fails."""
+    if host.lower() == "auth.roblox.com":
+        return list(ROBLOX_EDGE_IPS)
     server, tls_name = PROVIDERS.get(provider, PROVIDERS["quad9"])
     query = struct.pack(">HHHHHH", 0x4d42, 0x0100, 1, 0, 0, 0)
     for label in host.rstrip(".").split("."):
         query += bytes([len(label)]) + label.encode()
     query += b"\0" + struct.pack(">HH", 1, 1)
-    raw = socket.create_connection((server, 853), timeout=timeout)
-    with ssl.create_default_context().wrap_socket(raw, server_hostname=tls_name) as connection:
-        connection.sendall(struct.pack(">H", len(query)) + query)
-        length = struct.unpack(">H", DnsForwarder._read_exact(connection, 2))[0]
-        response = DnsForwarder._read_exact(connection, length)
+    response = None
+    try:
+        raw = socket.create_connection((server, 853), timeout=timeout)
+        with ssl.create_default_context().wrap_socket(raw, server_hostname=tls_name) as connection:
+            connection.sendall(struct.pack(">H", len(query)) + query)
+            length = struct.unpack(">H", DnsForwarder._read_exact(connection, 2))[0]
+            response = DnsForwarder._read_exact(connection, length)
+    except Exception:
+        # Fall back to DNS-over-HTTPS (port 443) if port 853 is blocked
+        url = f"https://{tls_name}/dns-query"
+        req = urllib.request.Request(
+            url,
+            data=query,
+            headers={"Content-Type": "application/dns-message", "Accept": "application/dns-message", "User-Agent": "MacOBlox"}
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = resp.read()
+                if len(data) >= 12 and data[:2] == query[:2]:
+                    response = data
+        except Exception:
+            pass
+    if not response:
+        return []
 
     def skip_name(position):
         while True:
@@ -197,4 +339,14 @@ def resolve_a(host, provider="quad9", timeout=5):
         if kind == 1 and length == 4:
             addresses.append(socket.inet_ntoa(response[offset:offset + 4]))
         offset += length
+
+    if host.lower().endswith(".roblox.com") or host.lower() == "roblox.com":
+        fixed = []
+        for a in addresses:
+            if a.startswith("104.") or a.startswith("172.6") or a.startswith("172.7"):
+                fixed.append("128.116.5.3")
+            else:
+                fixed.append(a)
+        if fixed:
+            addresses = fixed
     return addresses

@@ -216,3 +216,66 @@ static _Bool macoblox_availability_version_check(unsigned long count, darwin_bui
     return 0;
 }
 DYLD_INTERPOSE(macoblox_availability_version_check, _availability_version_check)
+
+/* getpwuid / getpwnam: In Darling without opendirectoryd, getpwuid returns NULL.
+ * RobloxCrashHandler and RobloxPlayer dereference pw_dir without checking for NULL,
+ * crashing with SIGSEGV in RBX::FileSystem::getUserDirectory. */
+struct darwin_passwd {
+    char *pw_name;
+    char *pw_passwd;
+    int pw_uid;
+    int pw_gid;
+    long pw_change;
+    char *pw_class;
+    char *pw_gecos;
+    char *pw_dir;
+    char *pw_shell;
+    long pw_expire;
+};
+extern struct darwin_passwd *getpwuid(unsigned int);
+extern struct darwin_passwd *getpwnam(const char *);
+
+static struct darwin_passwd macoblox_fake_pw = {
+    "tanukis",
+    "*",
+    1000,
+    1000,
+    0,
+    "",
+    "Tanukis",
+    "/Users/tanukis",
+    "/bin/bash",
+    0,
+};
+
+static struct darwin_passwd *macoblox_getpwuid(unsigned int uid) {
+    struct darwin_passwd *res = getpwuid(uid);
+    if (res)
+        return res;
+    const char *user = getenv("USER");
+    const char *home = getenv("HOME");
+    if (user && user[0])
+        macoblox_fake_pw.pw_name = (char *)user;
+    if (home && home[0])
+        macoblox_fake_pw.pw_dir = (char *)home;
+    macoblox_fake_pw.pw_uid = (int)uid;
+    return &macoblox_fake_pw;
+}
+DYLD_INTERPOSE(macoblox_getpwuid, getpwuid)
+
+static struct darwin_passwd *macoblox_getpwnam(const char *name) {
+    struct darwin_passwd *res = getpwnam(name);
+    if (res)
+        return res;
+    const char *user = getenv("USER");
+    const char *home = getenv("HOME");
+    if (name && name[0])
+        macoblox_fake_pw.pw_name = (char *)name;
+    else if (user && user[0])
+        macoblox_fake_pw.pw_name = (char *)user;
+    if (home && home[0])
+        macoblox_fake_pw.pw_dir = (char *)home;
+    return &macoblox_fake_pw;
+}
+DYLD_INTERPOSE(macoblox_getpwnam, getpwnam)
+

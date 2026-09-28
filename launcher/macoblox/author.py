@@ -10,18 +10,17 @@ import urllib.request
 
 from . import core, dns
 
-NAME = "Narezany"
-ROBLOX_USER = "H4Ru_456"
-ROBLOX_ID = 8847914296
-PROFILE_URL = f"https://www.roblox.com/users/{ROBLOX_ID}/profile"
+NAME = "Monster Dev"
+ROBLOX_USER = "MonsterDev"
+ROBLOX_ID = None
+PROFILE_URL = "https://github.com/narezy/MacOBlox"
 DISCORD_URL = "https://discord.gg/bpX9rTttCa"
 GITHUB_URL = "https://github.com/narezy/MacOBlox"
 BOOSTY_URL = "https://boosty.to/ega_link"
 YOOMONEY_URL = "https://yoomoney.ru/to/4100118196133693"
 
-AVATAR = core.CACHE_DIR / "author-avatar.png"
-THUMBNAIL_API = ("https://thumbnails.roblox.com/v1/users/avatar-headshot"
-                 f"?userIds={ROBLOX_ID}&size=150x150&format=Png&isCircular=false")
+AVATAR = core.PROJECT / "branding" / "icons" / "crabblox-128.png"
+THUMBNAIL_API = ""
 
 
 class _PinnedHTTPS(http.client.HTTPSConnection):
@@ -62,24 +61,8 @@ def _get(url, provider, timeout=10):
 
 
 def avatar(settings, max_age=86400):
-    """Path to the cached avatar headshot, refreshed once a day. Returns the
-    old copy (or None) when Roblox is unreachable."""
-    try:
-        if time.time() - AVATAR.stat().st_mtime < max_age:
-            return AVATAR
-    except OSError:
-        pass
-    provider = settings.get("dns")
-    provider = provider if provider in dns.PROVIDERS else "quad9"
-    try:
-        info = json.loads(_get(THUMBNAIL_API, provider))
-        image = _get(info["data"][0]["imageUrl"], provider)
-        if not image.startswith(b"\x89PNG"):
-            raise ValueError("not a PNG")
-        core.CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        partial = AVATAR.with_suffix(".part")
-        partial.write_bytes(image)
-        partial.replace(AVATAR)
-    except (OSError, ValueError, KeyError, IndexError):
-        pass
-    return AVATAR if AVATAR.exists() else None
+    """Path to Crabblox logo avatar for Monster Dev."""
+    if AVATAR.exists():
+        return AVATAR
+    fallback = core.PROJECT / "branding" / "icons" / "macoblox-128.png"
+    return fallback if fallback.exists() else None

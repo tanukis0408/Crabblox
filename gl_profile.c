@@ -215,6 +215,8 @@ DYLD_INTERPOSE(macoblox_eglChooseConfig, eglChooseConfig)
 
 static void *macoblox_eglCreateWindowSurface(void *display, void *config, unsigned long window,
                                              const int *attributes) {
+    if (!window)
+        return 0;
     void *surface = eglCreateWindowSurface(display, config, window, attributes);
     if (surface)
         return surface;

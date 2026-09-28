@@ -59,7 +59,7 @@ def _error_dialog(window, heading, details):
     people can send it. Also kept in ~/.cache/macoblox/last-error.txt."""
     try:
         core.CACHE_DIR.mkdir(parents=True, exist_ok=True)
-        (core.CACHE_DIR / "last-error.txt").write_text(f"Mac O’ Blox {__version__}\n{heading}\n\n{details}\n")
+        (core.CACHE_DIR / "last-error.txt").write_text(f"Crabblox {__version__} by Monster Dev\n{heading}\n\n{details}\n")
     except OSError:
         pass
     dialog = Adw.AlertDialog(heading=heading)
@@ -76,7 +76,7 @@ def _error_dialog(window, heading, details):
 
     def response(_dialog, result):
         if result == "copy":
-            window.get_clipboard().set(f"Mac O’ Blox {__version__}\n{heading}\n\n{details}")
+            window.get_clipboard().set(f"Crabblox {__version__} by Monster Dev\n{heading}\n\n{details}")
 
     dialog.connect("response", response)
     dialog.present(window)
@@ -87,8 +87,8 @@ class PlayPage(Gtk.Box):
         super().__init__(orientation=Gtk.Orientation.VERTICAL)
         self.window = window
         status = Adw.StatusPage()
-        status.set_icon_name("macoblox")
-        status.set_title("Mac O’ Blox")
+        status.set_icon_name("crabblox")
+        status.set_title("Crabblox")
         status.set_vexpand(True)
         self.status = status
 
@@ -100,6 +100,12 @@ class PlayPage(Gtk.Box):
         self.play.set_size_request(220, 52)
         self.play.connect("clicked", lambda *_args: window.play_clicked())
         box.append(self.play)
+
+        self.signin = Gtk.Button(label=_("Sign in to Roblox"))
+        self.signin.add_css_class("pill")
+        self.signin.set_size_request(220, -1)
+        self.signin.connect("clicked", lambda *_args: window.signin_clicked())
+        box.append(self.signin)
 
         self.stop = Gtk.Button(label=_("Stop Roblox"))
         self.stop.add_css_class("destructive-action")
@@ -135,7 +141,7 @@ class PlayPage(Gtk.Box):
 
         status.set_child(box)
         self.append(status)
-        version = Gtk.Label(label=f"Mac O’ Blox {__version__}", margin_bottom=10)
+        version = Gtk.Label(label=f"Crabblox {__version__} • Monster Dev", margin_bottom=10)
         version.add_css_class("dim-label")
         version.add_css_class("caption")
         self.append(version)
@@ -143,17 +149,22 @@ class PlayPage(Gtk.Box):
 
     def refresh(self, running=False):
         version = core.installed_version()
+        signed_in = core.signed_in()
+        user = core.signed_in_user()
         parts = [_("Roblox {version}", version=version) if version else _("Roblox not found")]
         parts.append(_("Darling running") if core.darlingserver_running()
                      else _("Darling starts with the game"))
-        if version and not running and not core.signed_in():
-            parts.append(_("Sign in with Quick Login"))
+        if signed_in:
+            parts.append(_("Signed in as {user}", user=user) if user else _("Signed in"))
+        elif version and not running:
+            parts.append(_("Sign in with Quick Login or Cookie"))
         self.status.set_description(" · ".join(parts))
         self.play.set_sensitive(not running)
         if running:
             self.play.set_label(_("Roblox is running"))
         else:
             self.play.set_label(_("Play") if version else _("Install Roblox"))
+        self.signin.set_visible(not signed_in and not running)
         self.stop.set_visible(running)
         self.log_button.set_visible(self.window.last_log is not None and not running)
 
@@ -403,10 +414,21 @@ class SettingsPage(Adw.PreferencesPage):
         self.add(roblox)
 
         account = Adw.PreferencesGroup(title=_("Account"))
-        logout = _button_row(_("Sign out"))
-        logout.add_css_class("destructive-action")
-        logout.connect("activated", lambda *_args: self.logout())
-        account.add(logout)
+        if core.signed_in():
+            user = core.signed_in_user()
+            status_row = Adw.ActionRow(
+                title=_("Signed in as {user}", user=user) if user else _("Signed in"),
+                subtitle=_("Session saved in Cookies.plist")
+            )
+            account.add(status_row)
+            logout = _button_row(_("Sign out"))
+            logout.add_css_class("destructive-action")
+            logout.connect("activated", lambda *_args: self.logout())
+            account.add(logout)
+        else:
+            signin_row = _button_row(_("Sign in to Roblox"))
+            signin_row.connect("activated", lambda *_args: self.window.signin_clicked())
+            account.add(signin_row)
         self.add(account)
 
         diagnostics = Adw.PreferencesGroup(
@@ -508,6 +530,8 @@ class SettingsPage(Adw.PreferencesPage):
             if result == "logout":
                 core.logout()
                 _toast(self.window.toasts, _("Session deleted"))
+                self.window.play_page.refresh()
+                GLib.idle_add(lambda: self.window.build("settings") and False)
 
         dialog.connect("response", response)
         dialog.present(self.window)
@@ -532,7 +556,7 @@ class SettingsPage(Adw.PreferencesPage):
         GLib.timeout_add_seconds(2, lambda: self.window.play_page.refresh() and False)
 
 
-ABOUT = ("Mac O’ Blox runs the real Roblox client for macOS on Linux through Darling. "
+ABOUT = ("Crabblox runs the real Roblox client for macOS on Linux through Darling. "
          "It is not made by Roblox and is not affiliated with it.")
 
 
@@ -553,7 +577,7 @@ class InfoPage(Adw.PreferencesPage):
         super().__init__(title=_("Info"), icon_name="help-about-symbolic")
         self.window = window
 
-        about = Adw.PreferencesGroup(title="Mac O’ Blox", description=_(ABOUT))
+        about = Adw.PreferencesGroup(title="Crabblox", description=_(ABOUT))
         self.add(about)
 
         community = Adw.PreferencesGroup(title=_("Community"))
@@ -565,24 +589,19 @@ class InfoPage(Adw.PreferencesPage):
             community.add(row)
         self.add(community)
 
-        made_by = Adw.PreferencesGroup(title=_("Author"))
+        made_by = Adw.PreferencesGroup(title=_("Developers"))
         self.avatar = Adw.Avatar(size=48, text=author.NAME, show_initials=True)
         profile = Adw.ActionRow(title=author.NAME, activatable=True,
-                                subtitle=_("{user} on Roblox", user="@" + author.ROBLOX_USER))
+                                subtitle=_("Monster Dev team"))
         profile.add_prefix(self.avatar)
         profile.add_suffix(Gtk.Image(icon_name="adw-external-link-symbolic"))
         profile.connect("activated", lambda *_args: _open_uri(window, author.PROFILE_URL))
         made_by.add(profile)
-        claude = Adw.ActionRow(title=_("Made with Claude Opus 5.5"), activatable=True,
-                               subtitle=_("Anthropic's AI wrote the code together with the author"))
-        claude.add_suffix(Gtk.Image(icon_name="adw-external-link-symbolic"))
-        claude.connect("activated", lambda *_args: _open_uri(window, "https://www.anthropic.com/claude"))
-        made_by.add(claude)
         self.add(made_by)
 
         support = Adw.PreferencesGroup(
             title=_("Support the project"),
-            description=_("Mac O’ Blox is free. If it helped you, you can thank the author."))
+            description=_("Crabblox is free. Developed by Monster Dev."))
         for title, subtitle, uri in [("Boosty", "Cards from any country", author.BOOSTY_URL),
                                      ("YooMoney", "For Russia", author.YOOMONEY_URL)]:
             row = Adw.ActionRow(title=_(title), subtitle=_(subtitle), activatable=True)
@@ -606,7 +625,7 @@ class InfoPage(Adw.PreferencesPage):
 
 class LauncherWindow(Adw.ApplicationWindow):
     def __init__(self, app):
-        super().__init__(application=app, title="Mac O’ Blox")
+        super().__init__(application=app, title="Crabblox")
         self.set_default_size(560, 680)
         # A fixed size makes tiling compositors (Hyprland, Sway) float the
         # launcher like a dialog instead of tiling it.
@@ -617,6 +636,12 @@ class LauncherWindow(Adw.ApplicationWindow):
         self.last_log = None
         # MACOBLOX_PAGE opens another tab first (for screenshots).
         self.build(os.environ.get("MACOBLOX_PAGE", "play"))
+        if not core.signed_in():
+            def auto_import():
+                user, bname = core.import_browser_cookies()
+                if user:
+                    GLib.idle_add(lambda: self.play_page.refresh() if hasattr(self, "play_page") else None)
+            threading.Thread(target=auto_import, daemon=True).start()
 
     def build(self, page):
         """(Re)create the interface, e.g. after the language changes."""
@@ -661,6 +686,96 @@ class LauncherWindow(Adw.ApplicationWindow):
         dialog.add_response("ok", _("OK"))
         dialog.present(self)
 
+    def signin_clicked(self):
+        dialog = Adw.AlertDialog(
+            heading=_("Sign in to Roblox"),
+            body=_("Sign in in 1 click from your browser, paste your .ROBLOSECURITY cookie, or use Quick Login.")
+        )
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+
+        browser_btn = Gtk.Button(label=_("Sign in from Browser (Chrome / Firefox / Brave)"), halign=Gtk.Align.FILL)
+        browser_btn.add_css_class("suggested-action")
+        browser_btn.add_css_class("pill")
+
+        def on_browser_clicked(_btn):
+            _toast(self.toasts, _("Searching for active browser session…"))
+            def do_import():
+                user, bname = core.import_browser_cookies()
+                if user:
+                    def on_success():
+                        dialog.close()
+                        _toast(self.toasts, _("Signed in as {user} from {browser}!", user=user, browser=bname))
+                        self.play_page.refresh()
+                        if hasattr(self, "settings_page"):
+                            self.build("settings")
+                    GLib.idle_add(on_success)
+                else:
+                    GLib.idle_add(lambda: _toast(self.toasts, _("No active session found in browsers. Log into roblox.com in Chrome/Firefox first.")))
+            threading.Thread(target=do_import, daemon=True).start()
+
+        browser_btn.connect("clicked", on_browser_clicked)
+        box.append(browser_btn)
+
+        entry_group = Adw.PreferencesGroup(title=_("Or enter cookie manually (.ROBLOSECURITY)"))
+        entry_row = Adw.EntryRow(title=_("Value"))
+        entry_group.add(entry_row)
+        box.append(entry_group)
+
+        help_label = Gtk.Label(
+            label=_("How to get cookie: in browser where you are logged in, press F12 → Application/Storage → Cookies → roblox.com → copy .ROBLOSECURITY"),
+            wrap=True,
+            xalign=0
+        )
+        help_label.add_css_class("dim-label")
+        help_label.add_css_class("caption")
+        box.append(help_label)
+
+        expander = Adw.ExpanderRow(title=_("Or use Quick Login (via game)"))
+        exp_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=6, margin_bottom=6)
+        exp_label = Gtk.Label(
+            label=_("1. Launch Roblox by pressing Play.\n2. In Roblox, click 'Quick Log In' to see a 6-letter code.\n3. Open roblox.com/crossdevice on your phone or browser and confirm the code."),
+            wrap=True,
+            xalign=0
+        )
+        exp_label.add_css_class("caption")
+        exp_box.append(exp_label)
+        link_btn = Gtk.Button(label=_("Open roblox.com/crossdevice"), halign=Gtk.Align.START)
+        link_btn.add_css_class("flat")
+        link_btn.connect("clicked", lambda *_args: _open_uri(self, "https://www.roblox.com/crossdevice"))
+        exp_box.append(link_btn)
+        expander.add_row(Adw.ActionRow(child=exp_box))
+
+        quick_group = Adw.PreferencesGroup()
+        quick_group.add(expander)
+        box.append(quick_group)
+
+        dialog.set_extra_child(box)
+        dialog.add_response("cancel", _("Cancel"))
+        dialog.add_response("signin", _("Sign in"))
+        dialog.set_response_appearance("signin", Adw.ResponseAppearance.SUGGESTED)
+
+        def on_response(_dialog, response):
+            if response == "signin":
+                val = entry_row.get_text().strip()
+                if not val:
+                    _toast(self.toasts, _("Cookie is empty"))
+                    return
+                def do_login():
+                    try:
+                        username = core.save_session_cookie(val)
+                        def on_success():
+                            _toast(self.toasts, _("Signed in as {user}!", user=username))
+                            self.play_page.refresh()
+                            if hasattr(self, "settings_page"):
+                                self.build("settings")
+                        GLib.idle_add(on_success)
+                    except Exception as err:
+                        GLib.idle_add(lambda: _toast(self.toasts, str(err)))
+                threading.Thread(target=do_login, daemon=True).start()
+
+        dialog.connect("response", on_response)
+        dialog.present(self)
+
     def play_clicked(self):
         if core.installed_version():
             self.launch()
@@ -677,7 +792,7 @@ class LauncherWindow(Adw.ApplicationWindow):
             return
         dialog = Adw.AlertDialog(
             heading=_("Install Roblox Studio?"),
-            body=_("Studio runs in its Windows version through Wine. Mac O’ Blox downloads Wine, "
+            body=_("Studio runs in its Windows version through Wine. Crabblox downloads Wine, "
                    "DXVK and Studio, about 800 MB."))
         dialog.add_response("cancel", _("Cancel"))
         dialog.add_response("install", _("Install"))
@@ -793,9 +908,10 @@ class LauncherApp(Adw.Application):
 
     def do_activate(self):
         if not self.window:
-            Gtk.Window.set_default_icon_name("macoblox")
-            Gtk.IconTheme.get_for_display(Gdk.Display.get_default()).add_search_path(
-                str(core.PROJECT / "launcher" / "icons"))
+            theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+            theme.add_search_path(str(core.PROJECT / "branding" / "icons"))
+            theme.add_search_path(str(core.PROJECT / "launcher" / "icons"))
+            Gtk.Window.set_default_icon_name("crabblox")
             self.window = LauncherWindow(self)
             # Keep running while the window is hidden during a game.
             self.hold()
@@ -818,3 +934,8 @@ class LauncherApp(Adw.Application):
 
 def main():
     return LauncherApp().run(None)
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(main())
