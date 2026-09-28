@@ -834,14 +834,14 @@ class HostAudio:
         pipewire = os.environ.get("PIPEWIRE_REMOTE") or (runtime / "pipewire-0").exists()
         if pipewire and shutil.which("pw-cat"):
             return ["pw-cat", "--playback", "--raw", "--format", "f32", "--rate", "44100",
-                    "--channels", "2", "--latency", "40ms", "--media-role", "Game",
+                    "--channels", "2", "--latency", "60ms", "--media-role", "Game",
                     "-P", '{ application.name = "Roblox" application.icon-name = "macoblox" '
-                          f'media.name = "{cls.NAME}" }}',
+                          'media.name = "Roblox (Crabblox)" }',
                     str(fifo)]
         if shutil.which("pacat"):
             return ["pacat", "--playback", "--raw", "--format=float32le", "--rate=44100",
-                    "--channels=2", "--latency-msec=40", "--client-name=Roblox",
-                    f"--stream-name={cls.NAME}", "--property=media.role=game", str(fifo)]
+                    "--channels=2", "--latency-msec=60", "--client-name=Roblox",
+                    "--stream-name=Roblox (Crabblox)", "--property=media.role=game", str(fifo)]
         return None
 
     @classmethod
@@ -854,6 +854,11 @@ class HostAudio:
             fifo.unlink()
         os.mkfifo(fifo, 0o600)
         keep = os.open(fifo, os.O_RDWR)
+        try:
+            import fcntl
+            fcntl.fcntl(keep, getattr(fcntl, "F_SETPIPE_SZ", 1031), 262144)
+        except Exception:
+            pass
         player = subprocess.Popen(
             cls._player_command(fifo),
             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)

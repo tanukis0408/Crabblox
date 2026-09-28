@@ -60,19 +60,26 @@ impl HostAudio {
             .open(&fifo_path)
             .ok()?;
 
+        use std::os::unix::io::AsRawFd;
+        unsafe {
+            // Expand pipe buffer from default 64KB to 256KB (~740ms headroom)
+            // to completely eliminate buffer backpressure or write stalls
+            libc::fcntl(keep_file.as_raw_fd(), libc::F_SETPIPE_SZ, 262144);
+        }
+
         let mut cmd = Command::new(player_bin);
         if player_bin == "pw-cat" {
             cmd.args([
                 "--playback", "--raw", "--format", "f32", "--rate", "44100",
-                "--channels", "2", "--latency", "40ms", "--media-role", "Game",
-                "-P", "{ application.name = \"Roblox\" media.name = \"Roblox (Mac O’ Blox)\" }",
+                "--channels", "2", "--latency", "60ms", "--media-role", "Game",
+                "-P", "{ application.name = \"Roblox\" media.name = \"Roblox (Crabblox)\" }",
                 fifo_path.to_str()?,
             ]);
         } else {
             cmd.args([
                 "--playback", "--raw", "--format=float32le", "--rate=44100",
-                "--channels=2", "--latency-msec=40", "--client-name=Roblox",
-                "--stream-name=Roblox (Mac O’ Blox)", "--property=media.role=game",
+                "--channels=2", "--latency-msec=60", "--client-name=Roblox",
+                "--stream-name=Roblox (Crabblox)", "--property=media.role=game",
                 fifo_path.to_str()?,
             ]);
         }
