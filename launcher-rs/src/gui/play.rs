@@ -6,6 +6,97 @@ use crate::paths::Paths;
 use crate::runner;
 use crate::updater;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlaceJoinInfo {
+    pub place_id: u64,
+    pub deep_link: String,
+    pub web_url: String,
+}
+
+pub fn parse_place_input(raw: &str) -> Result<PlaceJoinInfo, String> {
+    let text = raw.trim();
+    if text.is_empty() {
+        return Err("Введите Place ID или ссылку на плейс".to_string());
+    }
+
+    // 1. Direct Place ID as integer
+    if let Ok(id) = text.parse::<u64>() {
+        if id > 0 {
+            return Ok(PlaceJoinInfo {
+                place_id: id,
+                deep_link: format!("roblox://experiences/start?placeId={id}"),
+                web_url: format!("https://www.roblox.com/games/{id}"),
+            });
+        }
+    }
+
+    // 2. HTTP/HTTPS Roblox game URL
+    if text.starts_with("http://") || text.starts_with("https://") {
+        if let Some(pos) = text.find("/games/") {
+            let after = &text[pos + 7..];
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(id) = digits.parse::<u64>() {
+                if id > 0 {
+                    return Ok(PlaceJoinInfo {
+                        place_id: id,
+                        deep_link: format!("roblox://experiences/start?placeId={id}"),
+                        web_url: format!("https://www.roblox.com/games/{id}"),
+                    });
+                }
+            }
+        }
+        let lower = text.to_lowercase();
+        if let Some(pos) = lower.find("placeid=") {
+            let after = &lower[pos + 8..];
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(id) = digits.parse::<u64>() {
+                if id > 0 {
+                    return Ok(PlaceJoinInfo {
+                        place_id: id,
+                        deep_link: format!("roblox://experiences/start?placeId={id}"),
+                        web_url: format!("https://www.roblox.com/games/{id}"),
+                    });
+                }
+            }
+        }
+    }
+
+    // 3. Deep link URL schemes (roblox:// or roblox-player:)
+    if text.starts_with("roblox://") || text.starts_with("roblox-player:") {
+        let lower = text.to_lowercase();
+        for marker in &["placeid=", "placeid:"] {
+            if let Some(pos) = lower.find(marker) {
+                let after = &lower[pos + marker.len()..];
+                let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+                if let Ok(id) = digits.parse::<u64>() {
+                    if id > 0 {
+                        return Ok(PlaceJoinInfo {
+                            place_id: id,
+                            deep_link: format!("roblox://experiences/start?placeId={id}"),
+                            web_url: format!("https://www.roblox.com/games/{id}"),
+                        });
+                    }
+                }
+            }
+        }
+        if let Some(pos) = lower.find("placeid") {
+            let after = lower[pos + 7..].trim_start_matches(|c| c == '=' || c == ':');
+            let digits: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(id) = digits.parse::<u64>() {
+                if id > 0 {
+                    return Ok(PlaceJoinInfo {
+                        place_id: id,
+                        deep_link: format!("roblox://experiences/start?placeId={id}"),
+                        web_url: format!("https://www.roblox.com/games/{id}"),
+                    });
+                }
+            }
+        }
+    }
+
+    Err("Не удалось распознать Place ID. Введите число (например, 1818) или ссылку на игру Roblox (например, https://www.roblox.com/games/1818).".to_string())
+}
+
 pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gtk4::Box {
     let root = gtk4::Box::new(gtk4::Orientation::Vertical, 0);
 
@@ -23,14 +114,72 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
         ver_str, user_str
     )));
 
-    let controls_box = gtk4::Box::new(gtk4::Orientation::Vertical, 12);
+    let controls_box = gtk4::Box::new(gtk4::Orientation::Vertical, 10);
     controls_box.set_halign(gtk4::Align::Center);
+
+    // System Status Badges
+    let status_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
+    status_box.set_halign(gtk4::Align::Center);
+    status_box.set_margin_bottom(4);
+
+    let vram_gb = runner::host_vram_bytes() >> 30;
+    let vram_badge = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    vram_badge.add_css_class("card");
+    vram_badge.set_margin_start(4);
+    vram_badge.set_margin_end(4);
+
+    let vram_icon = gtk4::Image::from_icon_name("video-display-symbolic");
+    vram_icon.set_margin_start(8);
+    vram_icon.set_margin_top(4);
+    vram_icon.set_margin_bottom(4);
+    let vram_label = gtk4::Label::new(Some(&format!("VRAM: {} ГБ", vram_gb)));
+    vram_label.add_css_class("caption");
+    vram_label.set_margin_end(8);
+    vram_label.set_margin_top(4);
+    vram_label.set_margin_bottom(4);
+    vram_badge.append(&vram_icon);
+    vram_badge.append(&vram_label);
+    vram_badge.set_tooltip_text(Some(&format!(
+        "Обнаруженная видеопамять GPU: {} ГБ (доступно для драйвера)",
+        vram_gb
+    )));
+
+    let darling_active = runner::is_darlingserver_running(&paths.darling_prefix);
+    let darling_badge = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    darling_badge.add_css_class("card");
+    darling_badge.set_margin_start(4);
+    darling_badge.set_margin_end(4);
+
+    let darling_icon = gtk4::Image::from_icon_name(if darling_active {
+        "emblem-ok-symbolic"
+    } else {
+        "emblem-default-symbolic"
+    });
+    darling_icon.set_margin_start(8);
+    darling_icon.set_margin_top(4);
+    darling_icon.set_margin_bottom(4);
+    let darling_label = gtk4::Label::new(Some(if darling_active {
+        "Darling: активен"
+    } else {
+        "Darling: готов"
+    }));
+    darling_label.add_css_class("caption");
+    darling_label.set_margin_end(8);
+    darling_label.set_margin_top(4);
+    darling_label.set_margin_bottom(4);
+    darling_badge.append(&darling_icon);
+    darling_badge.append(&darling_label);
+    darling_badge.set_tooltip_text(Some("Состояние контейнера Darling (darlingserver)"));
+
+    status_box.append(&vram_badge);
+    status_box.append(&darling_badge);
+    controls_box.append(&status_box);
 
     // Play or Install Button
     let play_button = gtk4::Button::with_label(if is_installed { "Играть" } else { "Установить Roblox" });
     play_button.add_css_class("suggested-action");
     play_button.add_css_class("pill");
-    play_button.set_size_request(220, 52);
+    play_button.set_size_request(240, 52);
 
     #[derive(Debug, Clone)]
     enum PlayState {
@@ -47,6 +196,29 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
     let win_rx = window.downgrade();
     let status_page_rx = status_page.downgrade();
     let paths_rx = paths.clone();
+    let darling_label_rx = darling_label.downgrade();
+    let darling_icon_rx = darling_icon.downgrade();
+
+    // Quick Place Join group below Play button
+    let join_group = adw::PreferencesGroup::builder()
+        .title("Быстрое подключение к серверу")
+        .description("Place ID или ссылка на игру")
+        .build();
+    join_group.set_size_request(340, -1);
+
+    let entry_row = adw::EntryRow::builder()
+        .title("Place ID или URL")
+        .build();
+    entry_row.set_tooltip_text(Some("Введите Place ID (например: 1818, 920587237) или ссылку https://www.roblox.com/games/1818"));
+
+    let join_btn = gtk4::Button::with_label("Присоединиться");
+    join_btn.add_css_class("suggested-action");
+    join_btn.set_valign(gtk4::Align::Center);
+    entry_row.add_suffix(&join_btn);
+    join_group.add(&entry_row);
+
+    let join_btn_rx = join_btn.downgrade();
+    let entry_row_rx = entry_row.downgrade();
 
     glib::spawn_future_local(async move {
         while let Ok(state) = rx.recv().await {
@@ -55,12 +227,25 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                     PlayState::Installing(msg) => {
                         btn.set_sensitive(false);
                         btn.set_label(&msg);
+                        if let Some(jb) = join_btn_rx.upgrade() {
+                            jb.set_sensitive(false);
+                        }
+                        if let Some(er) = entry_row_rx.upgrade() {
+                            er.set_sensitive(false);
+                        }
                     }
                     PlayState::Installed(ver) => {
                         btn.set_sensitive(true);
                         btn.set_label("Играть");
                         btn.remove_css_class("destructive-action");
                         btn.add_css_class("suggested-action");
+
+                        if let Some(jb) = join_btn_rx.upgrade() {
+                            jb.set_sensitive(true);
+                        }
+                        if let Some(er) = entry_row_rx.upgrade() {
+                            er.set_sensitive(true);
+                        }
 
                         if let Some(sp) = status_page_rx.upgrade() {
                             let u = auth::signed_in_user(&paths_rx).unwrap_or_else(|| "не авторизован".to_string());
@@ -69,27 +254,108 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                     }
                     PlayState::Starting => {
                         btn.set_sensitive(false);
-                        btn.set_label("Запуск Roblox…");
+                        if let Ok(place_id) = std::env::var("MACOBLOX_PLACE_ID") {
+                            btn.set_label(&format!("Запуск Place {}…", place_id));
+                        } else {
+                            btn.set_label("Запуск Roblox…");
+                        }
+
+                        if let Some(jb) = join_btn_rx.upgrade() {
+                            jb.set_sensitive(false);
+                        }
+                        if let Some(er) = entry_row_rx.upgrade() {
+                            er.set_sensitive(false);
+                        }
+                        if let Some(dl) = darling_label_rx.upgrade() {
+                            dl.set_label("Darling: активен");
+                        }
+                        if let Some(di) = darling_icon_rx.upgrade() {
+                            di.set_icon_name(Some("emblem-ok-symbolic"));
+                        }
                     }
                     PlayState::Playing => {
                         btn.set_sensitive(true);
                         btn.set_label("Остановить игру");
                         btn.remove_css_class("suggested-action");
                         btn.add_css_class("destructive-action");
+
+                        if let Some(jb) = join_btn_rx.upgrade() {
+                            jb.set_sensitive(false);
+                        }
+                        if let Some(er) = entry_row_rx.upgrade() {
+                            er.set_sensitive(false);
+                        }
+                        if let Some(dl) = darling_label_rx.upgrade() {
+                            dl.set_label("Darling: активен");
+                        }
+                        if let Some(di) = darling_icon_rx.upgrade() {
+                            di.set_icon_name(Some("emblem-ok-symbolic"));
+                        }
+
+                        if let Ok(place_id) = std::env::var("MACOBLOX_PLACE_ID") {
+                            if let Some(sp) = status_page_rx.upgrade() {
+                                let u = auth::signed_in_user(&paths_rx).unwrap_or_else(|| "не авторизован".to_string());
+                                sp.set_description(Some(&format!("В игре: Place {} • Пользователь: {}", place_id, u)));
+                            }
+                        }
                     }
                     PlayState::Stopped => {
+                        std::env::remove_var("MACOBLOX_PLACE_ID");
+                        std::env::remove_var("MACOBLOX_LAUNCH_URL");
+                        std::env::remove_var("ROBLOX_PLACE_ID");
+
                         btn.set_sensitive(true);
                         let is_inst = updater::installed_version(&paths_rx).is_some();
                         btn.set_label(if is_inst { "Играть" } else { "Установить Roblox" });
                         btn.remove_css_class("destructive-action");
                         btn.add_css_class("suggested-action");
+
+                        if let Some(jb) = join_btn_rx.upgrade() {
+                            jb.set_sensitive(true);
+                        }
+                        if let Some(er) = entry_row_rx.upgrade() {
+                            er.set_sensitive(true);
+                        }
+
+                        let active = runner::is_darlingserver_running(&paths_rx.darling_prefix);
+                        if let Some(dl) = darling_label_rx.upgrade() {
+                            dl.set_label(if active { "Darling: активен" } else { "Darling: готов" });
+                        }
+                        if let Some(di) = darling_icon_rx.upgrade() {
+                            di.set_icon_name(Some(if active { "emblem-ok-symbolic" } else { "emblem-default-symbolic" }));
+                        }
+
+                        if let Some(sp) = status_page_rx.upgrade() {
+                            let v = updater::installed_version(&paths_rx).unwrap_or_else(|| "не установлен".to_string());
+                            let u = auth::signed_in_user(&paths_rx).unwrap_or_else(|| "не авторизован".to_string());
+                            sp.set_description(Some(&format!("Roblox: {} • Вход выполнен: {}", v, u)));
+                        }
                     }
                     PlayState::Failed(err) => {
+                        std::env::remove_var("MACOBLOX_PLACE_ID");
+                        std::env::remove_var("MACOBLOX_LAUNCH_URL");
+                        std::env::remove_var("ROBLOX_PLACE_ID");
+
                         btn.set_sensitive(true);
                         let is_inst = updater::installed_version(&paths_rx).is_some();
                         btn.set_label(if is_inst { "Играть" } else { "Установить Roblox" });
                         btn.remove_css_class("destructive-action");
                         btn.add_css_class("suggested-action");
+
+                        if let Some(jb) = join_btn_rx.upgrade() {
+                            jb.set_sensitive(true);
+                        }
+                        if let Some(er) = entry_row_rx.upgrade() {
+                            er.set_sensitive(true);
+                        }
+
+                        let active = runner::is_darlingserver_running(&paths_rx.darling_prefix);
+                        if let Some(dl) = darling_label_rx.upgrade() {
+                            dl.set_label(if active { "Darling: активен" } else { "Darling: готов" });
+                        }
+                        if let Some(di) = darling_icon_rx.upgrade() {
+                            di.set_icon_name(Some(if active { "emblem-ok-symbolic" } else { "emblem-default-symbolic" }));
+                        }
 
                         if let Some(win) = win_rx.upgrade() {
                             let dialog = adw::AlertDialog::new(
@@ -152,7 +418,11 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
         }
 
         btn.set_sensitive(false);
-        btn.set_label("Запускаю…");
+        if let Ok(place_id) = std::env::var("MACOBLOX_PLACE_ID") {
+            btn.set_label(&format!("Запуск Place {}…", place_id));
+        } else {
+            btn.set_label("Запускаю…");
+        }
 
         let tx_clone = tx.clone();
         std::thread::spawn(move || {
@@ -229,6 +499,88 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
     });
     controls_box.append(&play_button);
 
+    // Quick Place Join action logic
+    let join_action = {
+        let entry_weak = entry_row.downgrade();
+        let win_weak = window.downgrade();
+        let play_btn_weak = play_button.downgrade();
+        let paths_join = paths.clone();
+
+        move || {
+            let entry = match entry_weak.upgrade() {
+                Some(e) => e,
+                None => return,
+            };
+            let win = match win_weak.upgrade() {
+                Some(w) => w,
+                None => return,
+            };
+            let play_btn = match play_btn_weak.upgrade() {
+                Some(b) => b,
+                None => return,
+            };
+
+            let raw_text = entry.text();
+            match parse_place_input(&raw_text) {
+                Ok(info) => {
+                    // Check if Roblox is installed
+                    if updater::installed_version(&paths_join).is_none() {
+                        let dialog = adw::AlertDialog::new(
+                            Some("Roblox не установлен"),
+                            Some("Сначала установите клиент Roblox с помощью кнопки «Установить Roblox» выше."),
+                        );
+                        dialog.add_response("ok", "OK");
+                        dialog.present(Some(&win));
+                        return;
+                    }
+
+                    // Check if Roblox is currently running
+                    if !runner::roblox_pids().is_empty() {
+                        let dialog = adw::AlertDialog::new(
+                            Some("Roblox уже запущен"),
+                            Some("Клиент Roblox уже работает. Остановите текущую игру перед подключением к новому серверу."),
+                        );
+                        dialog.add_response("ok", "OK");
+                        dialog.present(Some(&win));
+                        return;
+                    }
+
+                    // Set launch environment variables for Place ID and deep link
+                    std::env::set_var("MACOBLOX_PLACE_ID", info.place_id.to_string());
+                    std::env::set_var("MACOBLOX_LAUNCH_URL", &info.deep_link);
+                    std::env::set_var("ROBLOX_PLACE_ID", info.place_id.to_string());
+
+                    // Trigger launch via play button
+                    play_btn.emit_clicked();
+                }
+                Err(err_msg) => {
+                    let dialog = adw::AlertDialog::new(
+                        Some("Некорректный Place ID или URL"),
+                        Some(&err_msg),
+                    );
+                    dialog.add_response("ok", "OK");
+                    dialog.present(Some(&win));
+                }
+            }
+        }
+    };
+
+    let join_action_rc = std::rc::Rc::new(join_action);
+    {
+        let ja = join_action_rc.clone();
+        join_btn.connect_clicked(move |_| {
+            ja();
+        });
+    }
+    {
+        let ja = join_action_rc;
+        entry_row.connect_entry_activated(move |_| {
+            ja();
+        });
+    }
+
+    controls_box.append(&join_group);
+
     // Sign in Button
     let signin_button = gtk4::Button::with_label(if auth::signed_in(&paths) {
         "Сменить аккаунт"
@@ -236,7 +588,7 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
         "Войти в Roblox"
     });
     signin_button.add_css_class("pill");
-    signin_button.set_size_request(220, -1);
+    signin_button.set_size_request(240, -1);
 
     let paths_auth = paths.clone();
     let status_weak = status_page.downgrade();
@@ -298,13 +650,60 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
     // Roblox Studio Button
     let studio_button = gtk4::Button::with_label("Roblox Studio");
     studio_button.add_css_class("pill");
-    studio_button.set_size_request(220, -1);
+    studio_button.set_size_request(240, -1);
+
+    let paths_st_play = paths.clone();
+    let win_st_play = window.downgrade();
+    studio_button.connect_clicked(move |_| {
+        let candidate_paths = [
+            paths_st_play.project_dir.join("launcher/macoblox-launcher"),
+            paths_st_play.data_dir.join("launcher/macoblox-launcher"),
+            std::path::PathBuf::from("launcher/macoblox-launcher"),
+            paths_st_play.project_dir.join("macoblox-launcher"),
+        ];
+
+        let found = candidate_paths.into_iter().find(|p| p.is_file());
+        if let Some(script) = found {
+            let res = std::process::Command::new("python3")
+                .arg(&script)
+                .arg("--studio")
+                .spawn();
+
+            if let Some(win) = win_st_play.upgrade() {
+                match res {
+                    Ok(_) => {
+                        let dialog = adw::AlertDialog::new(
+                            Some("Roblox Studio запускается"),
+                            Some("Roblox Studio запускается через Wine и DXVK. Если это первый запуск, компоненты могут загружаться некоторое время."),
+                        );
+                        dialog.add_response("ok", "OK");
+                        dialog.present(Some(&win));
+                    }
+                    Err(e) => {
+                        let dialog = adw::AlertDialog::new(
+                            Some("Ошибка запуска"),
+                            Some(&format!("Не удалось запустить Roblox Studio:\n{e}")),
+                        );
+                        dialog.add_response("ok", "OK");
+                        dialog.present(Some(&win));
+                    }
+                }
+            }
+        } else if let Some(win) = win_st_play.upgrade() {
+            let dialog = adw::AlertDialog::new(
+                Some("Roblox Studio (Wine)"),
+                Some("Roblox Studio на Linux работает через переносимый Wine (staging wow64) с Direct3D 11 через DXVK.\n\nДля запуска выполните команду:\nlauncher/macoblox-launcher --studio"),
+            );
+            dialog.add_response("ok", "Понятно");
+            dialog.present(Some(&win));
+        }
+    });
     controls_box.append(&studio_button);
 
     // Community links
     let links_box = gtk4::Box::new(gtk4::Orientation::Horizontal, 8);
     links_box.set_halign(gtk4::Align::Center);
-    links_box.set_margin_top(8);
+    links_box.set_margin_top(4);
 
     let discord_btn = gtk4::Button::from_icon_name("macoblox-discord-symbolic");
     discord_btn.add_css_class("flat");
@@ -337,4 +736,52 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
     root.append(&version_label);
 
     root
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_place_input_direct_id() {
+        let res = parse_place_input("1818").unwrap();
+        assert_eq!(res.place_id, 1818);
+        assert_eq!(res.deep_link, "roblox://experiences/start?placeId=1818");
+        assert_eq!(res.web_url, "https://www.roblox.com/games/1818");
+
+        let res2 = parse_place_input("  920587237  \n").unwrap();
+        assert_eq!(res2.place_id, 920587237);
+    }
+
+    #[test]
+    fn test_parse_place_input_roblox_url() {
+        let res = parse_place_input("https://www.roblox.com/games/1818/Super-Bomb-Survival").unwrap();
+        assert_eq!(res.place_id, 1818);
+
+        let res2 = parse_place_input("https://roblox.com/games/920587237").unwrap();
+        assert_eq!(res2.place_id, 920587237);
+
+        let res3 = parse_place_input("https://www.roblox.com/discover?placeId=654321").unwrap();
+        assert_eq!(res3.place_id, 654321);
+    }
+
+    #[test]
+    fn test_parse_place_input_deep_link() {
+        let res = parse_place_input("roblox://experiences/start?placeId=1818").unwrap();
+        assert_eq!(res.place_id, 1818);
+
+        let res2 = parse_place_input("roblox-player:1+launchmode:play+placeid:1818").unwrap();
+        assert_eq!(res2.place_id, 1818);
+
+        let res3 = parse_place_input("roblox://placeId=9999").unwrap();
+        assert_eq!(res3.place_id, 9999);
+    }
+
+    #[test]
+    fn test_parse_place_input_invalid() {
+        assert!(parse_place_input("").is_err());
+        assert!(parse_place_input("   ").is_err());
+        assert!(parse_place_input("invalid_input").is_err());
+        assert!(parse_place_input("https://google.com").is_err());
+    }
 }

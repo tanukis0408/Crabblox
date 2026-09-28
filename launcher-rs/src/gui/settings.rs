@@ -264,7 +264,74 @@ pub fn build_settings_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -
 
     page.add(&roblox_group);
 
-    // 4. Diagnostics Group
+    // 4. Roblox Studio (Wine) Group
+    let studio_group = adw::PreferencesGroup::builder()
+        .title("Roblox Studio (Wine)")
+        .description("Среда разработки Roblox Studio работает через Wine (staging wow64) и DXVK")
+        .build();
+
+    let studio_row = adw::ActionRow::builder()
+        .title("Запустить Roblox Studio")
+        .subtitle("Запуск Windows-версии Studio через Wine с поддержкой Direct3D 11")
+        .build();
+
+    let launch_studio_btn = gtk4::Button::with_label("Запустить Roblox Studio");
+    launch_studio_btn.add_css_class("suggested-action");
+    launch_studio_btn.set_valign(gtk4::Align::Center);
+
+    let paths_studio = paths.clone();
+    let win_studio = window.downgrade();
+    launch_studio_btn.connect_clicked(move |_| {
+        let candidate_paths = [
+            paths_studio.project_dir.join("launcher/macoblox-launcher"),
+            paths_studio.data_dir.join("launcher/macoblox-launcher"),
+            std::path::PathBuf::from("launcher/macoblox-launcher"),
+            paths_studio.project_dir.join("macoblox-launcher"),
+        ];
+
+        let found_script = candidate_paths.into_iter().find(|p| p.is_file());
+
+        if let Some(script) = found_script {
+            let res = std::process::Command::new("python3")
+                .arg(&script)
+                .arg("--studio")
+                .spawn();
+
+            if let Some(win) = win_studio.upgrade() {
+                match res {
+                    Ok(_) => {
+                        let dialog = adw::AlertDialog::new(
+                            Some("Roblox Studio запускается"),
+                            Some("Команда запуска Roblox Studio через Wine отправлена. Если это первый запуск, Wine и компоненты Studio могут загружаться некоторое время."),
+                        );
+                        dialog.add_response("ok", "OK");
+                        dialog.present(Some(&win));
+                    }
+                    Err(e) => {
+                        let dialog = adw::AlertDialog::new(
+                            Some("Ошибка запуска"),
+                            Some(&format!("Не удалось выполнить запуск:\n{e}")),
+                        );
+                        dialog.add_response("ok", "OK");
+                        dialog.present(Some(&win));
+                    }
+                }
+            }
+        } else if let Some(win) = win_studio.upgrade() {
+            let dialog = adw::AlertDialog::new(
+                Some("Roblox Studio (Wine)"),
+                Some("Скрипт `launcher/macoblox-launcher` не найден.\n\nRoblox Studio на Linux работает через портативный Wine (Kron4ek staging wow64) с трансляцией Direct3D 11 в Vulkan через DXVK. Все компоненты и префикс загружаются автоматически в каталог данных Crabblox (директория studio/).\n\nДля запуска используйте команду в терминале:\nlauncher/macoblox-launcher --studio"),
+            );
+            dialog.add_response("ok", "Понятно");
+            dialog.present(Some(&win));
+        }
+    });
+
+    studio_row.add_suffix(&launch_studio_btn);
+    studio_group.add(&studio_row);
+    page.add(&studio_group);
+
+    // 5. Diagnostics Group
     let diag_group = adw::PreferencesGroup::builder()
         .title("Диагностика")
         .description("Инструменты отладки и просмотра логов")
@@ -282,6 +349,52 @@ pub fn build_settings_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -
         crate::gui::open_uri(&uri);
     });
     diag_group.add(&open_logs_row);
+
+    // Screenshots and recordings row
+    let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+    let host_pictures = dirs::picture_dir().unwrap_or_else(|| home.join("Pictures")).join("Roblox");
+    let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let darling_pictures = paths.darling_prefix
+        .join("Users")
+        .join(&username)
+        .join("Pictures/Roblox");
+
+    let display_pics_path = if darling_pictures.exists() {
+        darling_pictures.display().to_string()
+    } else {
+        host_pictures.display().to_string()
+    };
+
+    let screenshots_row = adw::ActionRow::builder()
+        .title("Скриншоты и видеозаписи")
+        .subtitle(&display_pics_path)
+        .activatable(true)
+        .build();
+    screenshots_row.add_suffix(&gtk4::Image::from_icon_name("folder-pictures-symbolic"));
+
+    let paths_scr = paths.clone();
+    screenshots_row.connect_activated(move |_| {
+        let home = dirs::home_dir().unwrap_or_else(|| std::path::PathBuf::from("/tmp"));
+        let host_pics = dirs::picture_dir().unwrap_or_else(|| home.join("Pictures")).join("Roblox");
+        let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+        let darling_pics = paths_scr.darling_prefix
+            .join("Users")
+            .join(&username)
+            .join("Pictures/Roblox");
+
+        let target_dir = if darling_pics.exists() {
+            darling_pics
+        } else if host_pics.exists() {
+            host_pics
+        } else {
+            let _ = std::fs::create_dir_all(&host_pics);
+            host_pics
+        };
+
+        let uri = format!("file://{}", target_dir.display());
+        crate::gui::open_uri(&uri);
+    });
+    diag_group.add(&screenshots_row);
 
     let restart_darling_row = adw::ActionRow::builder()
         .title("Перезапустить Darling")

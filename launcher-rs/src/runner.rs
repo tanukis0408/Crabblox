@@ -3,8 +3,9 @@ use crate::paths::Paths;
 use chrono::Local;
 use std::ffi::CString;
 use std::fs;
+use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 const LAUNCH_SCRIPT: &str = r#"
@@ -103,12 +104,40 @@ pub struct RobloxSession {
     pub rpc: Option<crate::discord_rpc::DiscordRpc>,
     pub log_path: PathBuf,
     pub child: Child,
+    pub diagnostics_performed: bool,
+}
+
+#[allow(dead_code)]
+impl RobloxSession {
+    pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        let status = self.child.wait()?;
+        if !status.success() && !self.diagnostics_performed {
+            scan_crash_diagnostics(&self.log_path);
+            self.diagnostics_performed = true;
+        }
+        Ok(status)
+    }
+
+    pub fn scan_diagnostics(&mut self) {
+        if !self.diagnostics_performed {
+            scan_crash_diagnostics(&self.log_path);
+            self.diagnostics_performed = true;
+        }
+    }
 }
 
 impl Drop for RobloxSession {
     fn drop(&mut self) {
         if let Some(ref r) = self.rpc {
             r.stop();
+        }
+        if !self.diagnostics_performed {
+            if let Ok(Some(status)) = self.child.try_wait() {
+                if !status.success() {
+                    scan_crash_diagnostics(&self.log_path);
+                    self.diagnostics_performed = true;
+                }
+            }
         }
     }
 }
@@ -422,8 +451,85 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         args.push("MACOBLOX_AUDIO=0".into());
     }
 
-    let mut cmd = Command::new("darling");
-    cmd.args(&args)
+    // Check wrapper tools: GameMode, Gamescope, MangoHud
+    let disable_gamemode = std::env::var("CRABBLOX_DISABLE_GAMEMODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let gamemode_bin = if !disable_gamemode {
+        find_binary("gamemoderun")
+    } else {
+        None
+    };
+
+    let mangohud_requested = std::env::var("CRABBLOX_MANGOHUD")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let mangohud_bin = if mangohud_requested {
+        let bin = find_binary("mangohud");
+        if bin.is_none() {
+            eprintln!("Warning: CRABBLOX_MANGOHUD=1 is set, but 'mangohud' binary was not found.");
+        }
+        bin
+    } else {
+        None
+    };
+
+    let gamescope_requested = std::env::var("CRABBLOX_GAMESCOPE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    let gamescope_bin = if gamescope_requested {
+        let bin = find_binary("gamescope");
+        if bin.is_none() {
+            eprintln!("Warning: CRABBLOX_GAMESCOPE=1 is set, but 'gamescope' binary was not found.");
+        }
+        bin
+    } else {
+        None
+    };
+
+    if gamemode_bin.is_some() {
+        println!("GameMode enabled: launching with gamemoderun");
+    }
+    if mangohud_bin.is_some() {
+        println!("MangoHud enabled: launching with mangohud");
+    }
+    if gamescope_bin.is_some() {
+        println!("Gamescope enabled: launching with gamescope");
+    }
+
+    // Build the execution command chain:
+    // Base command: darling <args...>
+    let mut exec_chain = vec!["darling".to_string()];
+    exec_chain.extend(args);
+
+    // If MangoHud is enabled, wrap darling
+    if mangohud_bin.is_some() {
+        let mut wrapped = vec!["mangohud".to_string()];
+        wrapped.extend(exec_chain);
+        exec_chain = wrapped;
+    }
+
+    // If Gamescope is enabled, wrap command with gamescope [--]
+    if gamescope_bin.is_some() {
+        let mut wrapped = vec!["gamescope".to_string()];
+        if let Ok(gs_args) = std::env::var("CRABBLOX_GAMESCOPE_ARGS") {
+            wrapped.extend(gs_args.split_whitespace().map(|s| s.to_string()));
+        }
+        wrapped.push("--".to_string());
+        wrapped.extend(exec_chain);
+        exec_chain = wrapped;
+    }
+
+    // If GameMode is enabled, wrap outer command with gamemoderun
+    if gamemode_bin.is_some() {
+        let mut wrapped = vec!["gamemoderun".to_string()];
+        wrapped.extend(exec_chain);
+        exec_chain = wrapped;
+    }
+
+    let program = exec_chain.remove(0);
+    let mut cmd = Command::new(program);
+    cmd.args(&exec_chain)
         .stdout(Stdio::from(log_file.try_clone()?))
         .stderr(Stdio::from(log_file));
 
@@ -466,5 +572,218 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         rpc,
         log_path,
         child,
+        diagnostics_performed: false,
     })
+}
+
+#[allow(dead_code)]
+pub fn find_binary(name: &str) -> Option<PathBuf> {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    for dir in &["/usr/bin", "/usr/sbin", "/usr/local/bin", "/bin", "/sbin"] {
+        let candidate = Path::new(dir).join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    if Command::new(name)
+        .arg("/bin/true")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        return Some(PathBuf::from(name));
+    }
+    None
+}
+
+#[allow(dead_code)]
+pub fn scan_crash_diagnostics(log_path: &Path) {
+    eprintln!("\n=======================================================");
+    eprintln!("        Crabblox Crash Diagnostics & Troubleshooting   ");
+    eprintln!("=======================================================");
+    eprintln!("Roblox process exited with a failure code.");
+    eprintln!("Scanning log file for crash signatures: {:?}", log_path);
+
+    let content = match read_log_tail(log_path, 2 * 1024 * 1024) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("Could not read log file: {e}");
+            eprintln!("=======================================================\n");
+            return;
+        }
+    };
+
+    let content_lower = content.to_lowercase();
+    let mut found_diagnostics = Vec::new();
+
+    if content_lower.contains("segmentation fault")
+        || content_lower.contains("sigsegv")
+        || content_lower.contains("exc_bad_access")
+        || content_lower.contains("segfault at")
+        || content_lower.contains("code=segv")
+    {
+        found_diagnostics.push(
+            "• Memory access violation (Segmentation Fault / SIGSEGV / EXC_BAD_ACCESS):\n  \
+             Roblox or Darling crashed while accessing invalid memory.\n  \
+             Diagnostic advice:\n    \
+             - Clear the Mesa shader cache: rm -rf ~/.cache/mesa_shader_cache\n    \
+             - Restart the Darling container: crabblox run --restart-darling\n    \
+             - Update your host GPU graphics drivers (Mesa / NVIDIA).\n    \
+             - If running under Wayland, test under X11 or with Gamescope (CRABBLOX_GAMESCOPE=1)."
+        );
+    }
+
+    if content_lower.contains("dyld: symbol not found")
+        || content_lower.contains("symbol not found:")
+        || content_lower.contains("symbol lookup error")
+        || content_lower.contains("lazy symbol binding failed")
+        || content_lower.contains("dyld: library not loaded")
+        || content_lower.contains("reason: image not found")
+    {
+        found_diagnostics.push(
+            "• Dynamic linker failure (dyld symbol / library lookup error):\n  \
+             A required macOS Darwin dynamic symbol or stub framework was not found.\n  \
+             Diagnostic advice:\n    \
+             - Rebuild the MacOBlox shims: ./build_debug_shim.sh\n    \
+             - Verify stub frameworks (CoreML, CoreHaptics, DeviceCheck) are installed in the Darling prefix System/Library/Frameworks.\n    \
+             - Ensure DYLD_INSERT_LIBRARIES points to libMacOBloxShims.dylib."
+        );
+    }
+
+    if content_lower.contains("cannot connect to darlingserver")
+        || content_lower.contains("failed to connect to darlingserver")
+        || content_lower.contains("darlingserver communication failure")
+        || content_lower.contains("communication error with darlingserver")
+        || content_lower.contains("darlingserver is not responding")
+        || (content_lower.contains("darlingserver")
+            && (content_lower.contains("connection refused")
+                || content_lower.contains("broken pipe")
+                || content_lower.contains("dead")
+                || content_lower.contains("died")
+                || content_lower.contains("socket error")))
+    {
+        found_diagnostics.push(
+            "• Darlingserver communication failure:\n  \
+             The Darling container daemon is unresponsive, terminated, or socket communication was lost.\n  \
+             Diagnostic advice:\n    \
+             - Restart Darling and clear stale state: crabblox run --restart-darling\n    \
+             - Kill any lingering darlingserver processes: killall -9 darlingserver\n    \
+             - Remove any stale socket/pid files in the Darling prefix (e.g. ~/.local/share/darling/.darlingserver.sock)."
+        );
+    }
+
+    if content_lower.contains("cannot open display")
+        || content_lower.contains("failed to open display")
+        || content_lower.contains("x11 connection rejected")
+        || content_lower.contains("no protocol specified")
+    {
+        found_diagnostics.push(
+            "• Display connection failure:\n  \
+             Failed to connect to the X11/Wayland display server.\n  \
+             Diagnostic advice:\n    \
+             - Ensure DISPLAY (or WAYLAND_DISPLAY) is properly set.\n    \
+             - Authorize local X11 access: xhost +local:\n    \
+             - If using Gamescope, ensure your user has access to GPU DRM/render devices."
+        );
+    }
+
+    if content_lower.contains("vk_error_")
+        || content_lower.contains("vkcreateinstance")
+        || content_lower.contains("unable to find a compatible vulkan")
+        || content_lower.contains("libgl error")
+    {
+        found_diagnostics.push(
+            "• Graphics / Vulkan pipeline failure:\n  \
+             Initialization of the 3D graphics backend failed.\n  \
+             Diagnostic advice:\n    \
+             - Check Vulkan installation with 'vulkaninfo --summary'.\n    \
+             - Ensure both 32-bit and 64-bit Vulkan drivers are present.\n    \
+             - Verify EGL/Vulkan device permissions."
+        );
+    }
+
+    if !found_diagnostics.is_empty() {
+        eprintln!("Identified Crash Signatures & Recommendations:\n");
+        for diag in found_diagnostics {
+            eprintln!("{}\n", diag);
+        }
+    } else {
+        eprintln!("No specific known signature matched. Review the log snippet below.\n");
+    }
+
+    let lines: Vec<&str> = content.lines().collect();
+    let tail_count = 15.min(lines.len());
+    if tail_count > 0 {
+        eprintln!("--- Log Tail (last {} lines) ---", tail_count);
+        for line in &lines[lines.len() - tail_count..] {
+            eprintln!("  {}", line);
+        }
+        eprintln!("--- End of Log Tail ---");
+    }
+    eprintln!("=======================================================\n");
+}
+
+fn read_log_tail(log_path: &Path, max_bytes: u64) -> std::io::Result<String> {
+    let mut file = fs::File::open(log_path)?;
+    let metadata = file.metadata()?;
+    let len = metadata.len();
+    if len > max_bytes {
+        file.seek(SeekFrom::Start(len - max_bytes))?;
+    }
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn test_find_binary() {
+        assert!(find_binary("gamemoderun").is_some());
+        assert!(find_binary("nonexistent_binary_xyz_123").is_none());
+    }
+
+    #[test]
+    fn test_scan_crash_diagnostics_segfault() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let mut file = temp.as_file();
+        writeln!(file, "Starting Darling...").unwrap();
+        writeln!(file, "RobloxPlayer[1234]: Segmentation fault: 11 (SIGSEGV)").unwrap();
+        writeln!(file, "darlingserver: child exited with signal 11").unwrap();
+
+        scan_crash_diagnostics(temp.path());
+    }
+
+    #[test]
+    fn test_scan_crash_diagnostics_dyld() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let mut file = temp.as_file();
+        writeln!(file, "dyld: Symbol not found: _OBJC_CLASS_$_CoreML").unwrap();
+        writeln!(file, "dyld: Library not loaded: @rpath/CoreML.framework/CoreML").unwrap();
+
+        scan_crash_diagnostics(temp.path());
+    }
+
+    #[test]
+    fn test_scan_crash_diagnostics_darlingserver() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let mut file = temp.as_file();
+        writeln!(file, "Cannot connect to darlingserver: Connection refused").unwrap();
+        writeln!(file, "Failed to connect to darlingserver at .darlingserver.sock").unwrap();
+
+        scan_crash_diagnostics(temp.path());
+    }
 }

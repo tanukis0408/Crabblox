@@ -153,9 +153,14 @@ async fn handle_query(
         }
     }
 
-    // Fallback: Resolve via host system resolver if DoH failed or returned no A records
+    // Fallback: Resolve via direct host system socket resolver if DoH failed, timed out, or returned no answers
     if qtype == 1 && !qname.is_empty() {
-        if let Ok(addrs) = tokio::net::lookup_host(format!("{qname}:443")).await {
+        let host_lookup = match tokio::net::lookup_host(format!("{qname}:443")).await {
+            Ok(addrs) => Ok(addrs),
+            Err(_) => tokio::net::lookup_host(format!("{qname}:80")).await,
+        };
+
+        if let Ok(addrs) = host_lookup {
             let mut ips = Vec::new();
             for addr in addrs {
                 if let SocketAddr::V4(v4) = addr {
@@ -183,9 +188,14 @@ async fn handle_query(
                     );
                 }
                 let _ = socket.send_to(&resp, peer).await;
+                return;
             }
         }
     }
+
+    // Cleanly respond with empty response if resolution failed or non-A type, so client doesn't hang
+    let resp = make_empty_response(&query);
+    let _ = socket.send_to(&resp, peer).await;
 }
 
 fn extract_qname_and_type(query: &[u8]) -> (String, u16) {
@@ -271,19 +281,31 @@ fn make_empty_response(query: &[u8]) -> Vec<u8> {
 async fn resolve_doh(query: &[u8]) -> Option<Vec<u8>> {
     let query_bytes = query.to_vec();
     tokio::task::spawn_blocking(move || {
-        let doh_endpoints = ["https://dns.google/dns-query", "https://dns.quad9.net/dns-query"];
+        let doh_endpoints = [
+            "https://dns.google/dns-query",
+            "https://cloudflare-dns.com/dns-query",
+            "https://dns.quad9.net/dns-query",
+        ];
         for url in doh_endpoints {
             let resp = ureq::post(url)
                 .set("Content-Type", "application/dns-message")
                 .set("Accept", "application/dns-message")
-                .timeout(Duration::from_secs(3))
+                .timeout(Duration::from_secs(2))
                 .send_bytes(&query_bytes);
 
-            if let Ok(response) = resp {
-                let mut reader = response.into_reader();
-                let mut out = Vec::new();
-                if std::io::copy(&mut reader, &mut out).is_ok() && out.len() >= 12 {
-                    return Some(out);
+            match resp {
+                Ok(response) => {
+                    if response.status() == 200 {
+                        let mut reader = response.into_reader();
+                        let mut out = Vec::new();
+                        if std::io::copy(&mut reader, &mut out).is_ok() && out.len() >= 12 {
+                            return Some(out);
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Try next DoH provider if this one times out or errors
+                    continue;
                 }
             }
         }
@@ -348,3 +370,62 @@ fn sanitize_response(response: &[u8]) -> Vec<u8> {
 
     res
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_dns_forwarder_lifecycle() {
+        let forwarder = DnsForwarder::start().await.expect("Failed to start forwarder");
+        assert!(forwarder.port > 0);
+        forwarder.stop();
+    }
+
+    #[tokio::test]
+    async fn test_resolve_doh_or_fallback() {
+        // Query for roblox.com A record
+        let query = [
+            0x12, 0x34, // ID
+            0x01, 0x00, // Standard query
+            0x00, 0x01, // Questions: 1
+            0x00, 0x00, // Answers: 0
+            0x00, 0x00, // Authority: 0
+            0x00, 0x00, // Additional: 0
+            0x06, b'r', b'o', b'b', b'l', b'o', b'x',
+            0x03, b'c', b'o', b'm',
+            0x00,       // null terminator
+            0x00, 0x01, // Type A
+            0x00, 0x01, // Class IN
+        ];
+
+        let resp = resolve_doh(&query).await;
+        // Either DoH succeeds or times out cleanly
+        if let Some(data) = resp {
+            assert!(data.len() >= 12);
+        }
+    }
+
+    #[test]
+    fn test_make_responses() {
+        let query = [
+            0xaa, 0xbb, // tx id
+            0x01, 0x00,
+            0x00, 0x01,
+            0x00, 0x00,
+            0x00, 0x00,
+            0x00, 0x00,
+            0x04, b't', b'e', b's', b't',
+            0x00,
+            0x00, 0x01,
+            0x00, 0x01,
+        ];
+        let empty = make_empty_response(&query);
+        assert_eq!(&empty[..2], &[0xaa, 0xbb]);
+
+        let a_resp = make_a_response(&query, &["1.2.3.4"]);
+        assert_eq!(&a_resp[..2], &[0xaa, 0xbb]);
+        assert!(a_resp.len() > query.len());
+    }
+}
+

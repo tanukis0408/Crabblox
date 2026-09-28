@@ -2,8 +2,43 @@ use crate::paths::Paths;
 use serde_json::{Map, Value};
 use std::fs;
 
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LightingTechnology {
+    Default = 0,
+    Voxel = 1,
+    ShadowMap = 2,
+    Future = 3,
+}
+
+#[allow(dead_code)]
+impl LightingTechnology {
+    pub fn from_u32(val: u32) -> Self {
+        match val {
+            1 => Self::Voxel,
+            2 => Self::ShadowMap,
+            3 => Self::Future,
+            _ => Self::Default,
+        }
+    }
+
+    pub fn as_u32(&self) -> u32 {
+        *self as u32
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Default => "По умолчанию (выбор игры)",
+            Self::Voxel => "Voxel (Фаза 1)",
+            Self::ShadowMap => "ShadowMap (Фаза 2)",
+            Self::Future => "Future is Bright (Фаза 3)",
+        }
+    }
+}
+
 pub struct FastFlags;
 
+#[allow(dead_code)]
 impl FastFlags {
     pub fn parse_flag_value(text: &str) -> Value {
         let s = text.trim();
@@ -135,5 +170,268 @@ impl FastFlags {
         flags.get("FFlagDebugDisableTelemetry")
             .map(|v| v.as_bool() == Some(true) || v.as_str() == Some("True") || v.as_str() == Some("true"))
             .unwrap_or(false)
+    }
+
+    // --- Lighting technology (Future is Bright Phase 3 / ShadowMap / Voxel) ---
+    pub fn apply_lighting_technology(paths: &Paths, tech: LightingTechnology) -> anyhow::Result<()> {
+        let mut flags = Self::load(paths);
+        match tech {
+            LightingTechnology::Default => {
+                flags.remove("FFlagDebugForceFutureIsBrightPhase3");
+                flags.remove("DFFlagDebugRenderForceTechnology");
+            }
+            LightingTechnology::Voxel => {
+                flags.remove("FFlagDebugForceFutureIsBrightPhase3");
+                flags.insert("DFFlagDebugRenderForceTechnology".into(), serde_json::json!(1));
+            }
+            LightingTechnology::ShadowMap => {
+                flags.remove("FFlagDebugForceFutureIsBrightPhase3");
+                flags.insert("DFFlagDebugRenderForceTechnology".into(), serde_json::json!(2));
+            }
+            LightingTechnology::Future => {
+                flags.insert("FFlagDebugForceFutureIsBrightPhase3".into(), serde_json::json!(true));
+                flags.insert("DFFlagDebugRenderForceTechnology".into(), serde_json::json!(3));
+            }
+        }
+        Self::save(paths, &flags)
+    }
+
+    pub fn get_lighting_technology(paths: &Paths) -> LightingTechnology {
+        let flags = Self::load(paths);
+        if let Some(val) = flags.get("DFFlagDebugRenderForceTechnology") {
+            let num = val.as_i64().or_else(|| val.as_str().and_then(|s| s.parse::<i64>().ok()));
+            match num {
+                Some(1) => return LightingTechnology::Voxel,
+                Some(2) => return LightingTechnology::ShadowMap,
+                Some(3) => return LightingTechnology::Future,
+                _ => {}
+            }
+        }
+        if let Some(val) = flags.get("FFlagDebugForceFutureIsBrightPhase3") {
+            if val.as_bool() == Some(true) || val.as_str() == Some("True") || val.as_str() == Some("true") {
+                return LightingTechnology::Future;
+            }
+        }
+        LightingTechnology::Default
+    }
+
+    pub fn apply_future_is_bright(paths: &Paths, enable: bool) -> anyhow::Result<()> {
+        Self::apply_lighting_technology(
+            paths,
+            if enable { LightingTechnology::Future } else { LightingTechnology::Default },
+        )
+    }
+
+    pub fn is_future_is_bright(paths: &Paths) -> bool {
+        Self::get_lighting_technology(paths) == LightingTechnology::Future
+    }
+
+    // --- Material styling (Classic 2021 pre-update materials) ---
+    pub fn apply_classic_materials(paths: &Paths, enable: bool) -> anyhow::Result<()> {
+        let mut flags = Self::load(paths);
+        if enable {
+            flags.insert("FFlagFixGraphicsQuality".into(), serde_json::json!(true));
+            flags.insert("DFFlagDisableNewMaterials2022".into(), serde_json::json!(true));
+        } else {
+            flags.remove("FFlagFixGraphicsQuality");
+            flags.remove("DFFlagDisableNewMaterials2022");
+        }
+        Self::save(paths, &flags)
+    }
+
+    pub fn is_classic_materials(paths: &Paths) -> bool {
+        let flags = Self::load(paths);
+        let mat2022 = flags.get("DFFlagDisableNewMaterials2022")
+            .map(|v| v.as_bool() == Some(true) || v.as_str() == Some("True") || v.as_str() == Some("true"))
+            .unwrap_or(false);
+        let fix_gfx = flags.get("FFlagFixGraphicsQuality")
+            .map(|v| v.as_bool() == Some(true) || v.as_str() == Some("True") || v.as_str() == Some("true"))
+            .unwrap_or(false);
+        mat2022 || fix_gfx
+    }
+
+    // --- Texture resolution / detail (Disable low-res texture LOD degradation) ---
+    pub fn apply_max_texture_detail(paths: &Paths, enable: bool) -> anyhow::Result<()> {
+        let mut flags = Self::load(paths);
+        if enable {
+            flags.insert("FIntRenderTextureDetail".into(), serde_json::json!(3));
+            flags.insert("DFIntTextureQualityOverride".into(), serde_json::json!(3));
+            flags.insert("DFFlagTextureQualityOverrideEnabled".into(), serde_json::json!(true));
+        } else {
+            flags.remove("FIntRenderTextureDetail");
+            flags.remove("DFIntTextureQualityOverride");
+            flags.remove("DFFlagTextureQualityOverrideEnabled");
+        }
+        Self::save(paths, &flags)
+    }
+
+    pub fn is_max_texture_detail(paths: &Paths) -> bool {
+        let flags = Self::load(paths);
+        let detail = flags.get("FIntRenderTextureDetail")
+            .map(|v| v.as_i64() == Some(3) || v.as_str() == Some("3"))
+            .unwrap_or(false);
+        let quality = flags.get("DFIntTextureQualityOverride")
+            .map(|v| v.as_i64() == Some(3) || v.as_str() == Some("3"))
+            .unwrap_or(false);
+        detail || quality
+    }
+
+    // --- UI: Toggle modern in-game Chrome UI ---
+    pub fn apply_chrome_ui(paths: &Paths, enable: bool) -> anyhow::Result<()> {
+        let mut flags = Self::load(paths);
+        if enable {
+            flags.insert("FFlagEnableInGameMenuChrome".into(), serde_json::json!(true));
+        } else {
+            flags.remove("FFlagEnableInGameMenuChrome");
+        }
+        Self::save(paths, &flags)
+    }
+
+    pub fn is_chrome_ui_enabled(paths: &Paths) -> bool {
+        let flags = Self::load(paths);
+        flags.get("FFlagEnableInGameMenuChrome")
+            .map(|v| v.as_bool() == Some(true) || v.as_str() == Some("True") || v.as_str() == Some("true"))
+            .unwrap_or(false)
+    }
+
+    // --- Helper methods to import and export JSON ---
+    pub fn import_json(paths: &Paths, json_str: &str) -> anyhow::Result<usize> {
+        let trimmed = json_str.trim();
+        if trimmed.is_empty() {
+            anyhow::bail!("Строка JSON пуста");
+        }
+        let parsed: Value = serde_json::from_str(trimmed)
+            .map_err(|e| anyhow::anyhow!("Неверный синтаксис JSON: {e}"))?;
+        let map = match parsed {
+            Value::Object(m) => m,
+            _ => anyhow::bail!("JSON должен быть объектом вида {{\"ИмяФлага\": значение}}"),
+        };
+        let count = map.len();
+        let mut flags = Self::load(paths);
+        for (k, v) in map {
+            let clean_k = k.trim().to_string();
+            if !clean_k.is_empty() {
+                flags.insert(clean_k, v);
+            }
+        }
+        Self::save(paths, &flags)?;
+        Ok(count)
+    }
+
+    pub fn export_json(paths: &Paths) -> anyhow::Result<String> {
+        let flags = Self::load(paths);
+        let s = serde_json::to_string_pretty(&flags)?;
+        Ok(s)
+    }
+
+    pub fn import_flags_json(paths: &Paths, json_str: &str) -> anyhow::Result<usize> {
+        Self::import_json(paths, json_str)
+    }
+
+    pub fn export_flags_json(paths: &Paths) -> anyhow::Result<String> {
+        Self::export_json(paths)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn create_test_paths() -> (TempDir, Paths) {
+        let temp = TempDir::new().unwrap();
+        let paths = Paths {
+            project_dir: temp.path().to_path_buf(),
+            data_dir: temp.path().to_path_buf(),
+            config_dir: temp.path().join("config"),
+            cache_dir: temp.path().to_path_buf(),
+            darling_prefix: temp.path().join("darling"),
+            darling_sysroot: temp.path().join("sysroot"),
+        };
+        (temp, paths)
+    }
+
+    #[test]
+    fn test_lighting_presets() {
+        let (_tmp, paths) = create_test_paths();
+        assert_eq!(FastFlags::get_lighting_technology(&paths), LightingTechnology::Default);
+
+        FastFlags::apply_lighting_technology(&paths, LightingTechnology::Voxel).unwrap();
+        assert_eq!(FastFlags::get_lighting_technology(&paths), LightingTechnology::Voxel);
+
+        FastFlags::apply_lighting_technology(&paths, LightingTechnology::ShadowMap).unwrap();
+        assert_eq!(FastFlags::get_lighting_technology(&paths), LightingTechnology::ShadowMap);
+
+        FastFlags::apply_lighting_technology(&paths, LightingTechnology::Future).unwrap();
+        assert_eq!(FastFlags::get_lighting_technology(&paths), LightingTechnology::Future);
+        assert!(FastFlags::is_future_is_bright(&paths));
+
+        FastFlags::apply_lighting_technology(&paths, LightingTechnology::Default).unwrap();
+        assert_eq!(FastFlags::get_lighting_technology(&paths), LightingTechnology::Default);
+        assert!(!FastFlags::is_future_is_bright(&paths));
+    }
+
+    #[test]
+    fn test_classic_materials() {
+        let (_tmp, paths) = create_test_paths();
+        assert!(!FastFlags::is_classic_materials(&paths));
+
+        FastFlags::apply_classic_materials(&paths, true).unwrap();
+        assert!(FastFlags::is_classic_materials(&paths));
+
+        FastFlags::apply_classic_materials(&paths, false).unwrap();
+        assert!(!FastFlags::is_classic_materials(&paths));
+    }
+
+    #[test]
+    fn test_max_texture_detail() {
+        let (_tmp, paths) = create_test_paths();
+        assert!(!FastFlags::is_max_texture_detail(&paths));
+
+        FastFlags::apply_max_texture_detail(&paths, true).unwrap();
+        assert!(FastFlags::is_max_texture_detail(&paths));
+
+        FastFlags::apply_max_texture_detail(&paths, false).unwrap();
+        assert!(!FastFlags::is_max_texture_detail(&paths));
+    }
+
+    #[test]
+    fn test_chrome_ui() {
+        let (_tmp, paths) = create_test_paths();
+        assert!(!FastFlags::is_chrome_ui_enabled(&paths));
+
+        FastFlags::apply_chrome_ui(&paths, true).unwrap();
+        assert!(FastFlags::is_chrome_ui_enabled(&paths));
+
+        FastFlags::apply_chrome_ui(&paths, false).unwrap();
+        assert!(!FastFlags::is_chrome_ui_enabled(&paths));
+    }
+
+    #[test]
+    fn test_import_export_json() {
+        let (_tmp, paths) = create_test_paths();
+        let initial_json = r#"{
+            "FFlagCustomTest": true,
+            "DFIntTargetValue": 120
+        }"#;
+
+        let count = FastFlags::import_json(&paths, initial_json).unwrap();
+        assert_eq!(count, 2);
+
+        let exported = FastFlags::export_json(&paths).unwrap();
+        assert!(exported.contains("FFlagCustomTest"));
+        assert!(exported.contains("DFIntTargetValue"));
+
+        // Test merge
+        let second_json = r#"{
+            "FFlagAnother": "hello"
+        }"#;
+        let count2 = FastFlags::import_json(&paths, second_json).unwrap();
+        assert_eq!(count2, 1);
+
+        let merged = FastFlags::load(&paths);
+        assert_eq!(merged.len(), 3);
+        assert_eq!(merged.get("FFlagAnother").unwrap().as_str(), Some("hello"));
+        assert_eq!(merged.get("FFlagCustomTest").unwrap().as_bool(), Some(true));
     }
 }
