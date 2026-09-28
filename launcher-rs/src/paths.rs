@@ -16,24 +16,45 @@ impl Paths {
             .and_then(|p| p.parent().map(|p| p.to_path_buf()))
             .unwrap_or_else(|| PathBuf::from("."));
 
-        // If running from repo, project dir is repo root
-        let project_dir = if exe_dir.join("../libMacOBloxShims.m").exists() {
-            exe_dir.join("..").canonicalize().unwrap_or(exe_dir)
-        } else if Path::new("libMacOBloxShims.m").exists() {
-            PathBuf::from(".").canonicalize().unwrap_or_else(|_| PathBuf::from("."))
-        } else {
-            PathBuf::from("/home/tanukis/MacOBlox")
-        };
-
         let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
-        let data_dir = if std::fs::metadata(&project_dir).map(|m| !m.permissions().readonly()).unwrap_or(false) {
+        let data_home = dirs::data_dir().unwrap_or_else(|| home.join(".local/share"));
+
+        let candidate_dirs = [
+            std::env::var("CRABBLOX_PROJECT_DIR").ok().map(PathBuf::from),
+            std::env::var("MACOBLOX_PROJECT_DIR").ok().map(PathBuf::from),
+            Some(exe_dir.clone()),
+            exe_dir.parent().map(|p| p.to_path_buf()),
+            exe_dir.parent().and_then(|p| p.parent()).map(|p| p.to_path_buf()),
+            Some(PathBuf::from(".")),
+            Some(data_home.join("Crabblox")),
+            Some(data_home.join("MacOBlox")),
+            Some(home.join(".local/share/Crabblox")),
+            Some(home.join(".local/share/MacOBlox")),
+            Some(home.join("Crabblox")),
+            Some(home.join("MacOBlox")),
+        ];
+
+        let project_dir = candidate_dirs
+            .into_iter()
+            .flatten()
+            .find(|dir| dir.join("build_debug_shim.sh").exists() || dir.join("libMacOBloxShims.m").exists())
+            .map(|dir| dir.canonicalize().unwrap_or(dir))
+            .unwrap_or_else(|| data_home.join("Crabblox"));
+
+        let data_dir = if std::fs::metadata(&project_dir).map(|m| !m.permissions().readonly()).unwrap_or(false)
+            && project_dir.join("build_debug_shim.sh").exists()
+        {
             project_dir.clone()
+        } else if data_home.join("Crabblox").exists() {
+            data_home.join("Crabblox")
+        } else if data_home.join("MacOBlox").exists() {
+            data_home.join("MacOBlox")
         } else {
-            dirs::data_dir().unwrap_or_else(|| home.join(".local/share")).join("macoblox")
+            data_home.join("Crabblox")
         };
 
-        let config_dir = dirs::config_dir().unwrap_or_else(|| home.join(".config")).join("macoblox");
-        let cache_dir = dirs::cache_dir().unwrap_or_else(|| home.join(".cache")).join("macoblox");
+        let config_dir = dirs::config_dir().unwrap_or_else(|| home.join(".config")).join("crabblox");
+        let cache_dir = dirs::cache_dir().unwrap_or_else(|| home.join(".cache")).join("crabblox");
 
         let darling_prefix = std::env::var("DPREFIX")
             .map(PathBuf::from)
@@ -65,17 +86,27 @@ impl Paths {
     pub fn shim_dylib(&self) -> PathBuf {
         if let Ok(shim) = std::env::var("MACOBLOX_PREBUILT_SHIM") {
             PathBuf::from(shim).join("libMacOBloxShims.dylib")
+        } else if self.project_dir.join("build/libMacOBloxShims.dylib").exists() {
+            self.project_dir.join("build/libMacOBloxShims.dylib")
         } else {
             self.data_dir.join("build/libMacOBloxShims.dylib")
         }
     }
 
     pub fn cookies_plist(&self) -> PathBuf {
-        let username = std::env::var("USER").unwrap_or_else(|_| "tanukis".to_string());
-        self.darling_prefix
+        let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+        let crabblox = self.darling_prefix
             .join("Users")
-            .join(username)
-            .join("Library/MacOBlox/Cookies.plist")
+            .join(&username)
+            .join("Library/Crabblox/Cookies.plist");
+        if crabblox.exists() {
+            crabblox
+        } else {
+            self.darling_prefix
+                .join("Users")
+                .join(&username)
+                .join("Library/MacOBlox/Cookies.plist")
+        }
     }
 
     pub fn fast_flags_file(&self) -> PathBuf {
