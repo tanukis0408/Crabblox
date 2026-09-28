@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use adw::prelude::*;
-use gtk4::prelude::*;
 use crate::auth;
 use crate::paths::Paths;
 use crate::updater;
@@ -49,8 +48,7 @@ pub fn build_settings_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -
 
                 dialog.connect_response(None, move |_, resp| {
                     if resp == "signout" {
-                        let _ = std::fs::remove_file(p.cookies_plist());
-                        let _ = std::fs::remove_file(p.user_cache_file());
+                        auth::sign_out(&p);
                         if let Some(r_up) = r.upgrade() {
                             r_up.set_title("Вход не выполнен");
                             r_up.set_subtitle("Авторизуйтесь на вкладке «Играть»");

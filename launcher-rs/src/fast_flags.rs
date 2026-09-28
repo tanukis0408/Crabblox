@@ -70,11 +70,12 @@ impl FastFlags {
 
     pub fn save(paths: &Paths, flags: &Map<String, Value>) -> anyhow::Result<()> {
         let file = paths.fast_flags_file();
-        if let Some(parent) = file.parent() {
-            fs::create_dir_all(parent)?;
-        }
+        let parent = file.parent().ok_or_else(|| anyhow::anyhow!("Invalid fast flags path"))?;
+        fs::create_dir_all(parent)?;
         let json_str = serde_json::to_string_pretty(flags)?;
-        fs::write(file, json_str)?;
+        let tmp_file = parent.join(format!(".ClientAppSettings.json.tmp.{}", std::process::id()));
+        fs::write(&tmp_file, json_str)?;
+        fs::rename(&tmp_file, &file)?;
         Ok(())
     }
 

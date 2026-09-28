@@ -5,7 +5,6 @@ pub mod settings;
 
 use std::sync::Arc;
 use adw::prelude::*;
-use gtk4::prelude::*;
 use crate::paths::Paths;
 
 pub const APP_ID: &str = "xyz.narez.MacOBlox";

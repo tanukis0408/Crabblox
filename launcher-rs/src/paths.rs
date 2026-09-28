@@ -6,6 +6,7 @@ pub struct Paths {
     pub config_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub darling_prefix: PathBuf,
+    #[allow(dead_code)]
     pub darling_sysroot: PathBuf,
 }
 
@@ -129,6 +130,7 @@ impl Paths {
             .join("Contents/MacOS/ClientSettings/ClientAppSettings.json")
     }
 
+    #[allow(dead_code)]
     pub fn settings_file(&self) -> PathBuf {
         self.config_dir.join("settings.json")
     }

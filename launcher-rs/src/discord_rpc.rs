@@ -133,7 +133,7 @@ fn run_rpc_loop(
                     "buttons": [
                         {
                             "label": "Crabblox (Monster Dev)",
-                            "url": "https://github.com/narezy/MacOBlox"
+                            "url": "https://github.com/tanukis0408/Crabblox"
                         }
                     ]
                 }
@@ -179,7 +179,7 @@ fn run_rpc_loop(
                     "buttons": [
                         {
                             "label": "Crabblox (Monster Dev)",
-                            "url": "https://github.com/narezy/MacOBlox"
+                            "url": "https://github.com/tanukis0408/Crabblox"
                         }
                     ]
                 }
@@ -192,10 +192,19 @@ fn run_rpc_loop(
     // 3. Keep-alive loop while Roblox runs
     while !stop_signal.load(Ordering::SeqCst) {
         let mut header = [0u8; 8];
-        if let Ok(()) = stream.read_exact(&mut header) {
-            let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
-            let mut buf = vec![0u8; len];
-            let _ = stream.read_exact(&mut buf);
+        match stream.read_exact(&mut header) {
+            Ok(()) => {
+                let len = u32::from_le_bytes([header[4], header[5], header[6], header[7]]) as usize;
+                let mut buf = vec![0u8; len];
+                let _ = stream.read_exact(&mut buf);
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+                // Timeout is normal on non-blocking / timed stream
+            }
+            Err(_) => {
+                // Discord closed connection or socket error
+                break;
+            }
         }
         std::thread::sleep(std::time::Duration::from_millis(500));
     }

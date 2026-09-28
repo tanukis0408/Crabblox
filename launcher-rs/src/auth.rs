@@ -100,11 +100,24 @@ pub fn save_session_cookie(paths: &Paths, cookie: &str) -> anyhow::Result<String
     dict.insert("Expires".into(), PlistValue::Date(expires.into()));
 
     let array = PlistValue::Array(vec![PlistValue::Dictionary(dict)]);
-    array.to_file_xml(&plist_path)?;
 
-    let mut perms = fs::metadata(&plist_path)?.permissions();
-    perms.set_mode(0o600);
-    fs::set_permissions(&plist_path, perms)?;
+    let username_env = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let macoblox_plist = paths.darling_prefix.join("Users").join(&username_env).join("Library/MacOBlox/Cookies.plist");
+    let crabblox_plist = paths.darling_prefix.join("Users").join(&username_env).join("Library/Crabblox/Cookies.plist");
+    let primary_plist = paths.cookies_plist();
+
+    for path in [&primary_plist, &macoblox_plist, &crabblox_plist] {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(()) = array.to_file_xml(path) {
+            if let Ok(metadata) = fs::metadata(path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o600);
+                let _ = fs::set_permissions(path, perms);
+            }
+        }
+    }
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -120,6 +133,16 @@ pub fn save_session_cookie(paths: &Paths, cookie: &str) -> anyhow::Result<String
     let _ = add_or_update_account(paths, saved);
 
     Ok(username)
+}
+
+pub fn sign_out(paths: &Paths) {
+    let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let macoblox_plist = paths.darling_prefix.join("Users").join(&username).join("Library/MacOBlox/Cookies.plist");
+    let crabblox_plist = paths.darling_prefix.join("Users").join(&username).join("Library/Crabblox/Cookies.plist");
+    let _ = fs::remove_file(macoblox_plist);
+    let _ = fs::remove_file(crabblox_plist);
+    let _ = fs::remove_file(paths.cookies_plist());
+    let _ = fs::remove_file(paths.user_cache_file());
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,10 +170,12 @@ pub fn load_accounts(paths: &Paths) -> Vec<SavedAccount> {
 
 pub fn save_accounts(paths: &Paths, accounts: &[SavedAccount]) -> anyhow::Result<()> {
     let file = accounts_file(paths);
-    if let Some(parent) = file.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-    fs::write(file, serde_json::to_string_pretty(accounts)?)?;
+    let parent = file.parent().ok_or_else(|| anyhow::anyhow!("Invalid accounts path"))?;
+    fs::create_dir_all(parent)?;
+    let content = serde_json::to_string_pretty(accounts)?;
+    let tmp_file = parent.join(format!(".accounts.json.tmp.{}", std::process::id()));
+    fs::write(&tmp_file, content)?;
+    fs::rename(&tmp_file, &file)?;
     Ok(())
 }
 
@@ -248,30 +273,56 @@ pub fn import_browser_cookies(paths: &Paths) -> anyhow::Result<Option<(String, S
 }
 
 fn extract_chromium_cookie(db_path: &Path) -> anyhow::Result<String> {
-    let tmp = tempfile::NamedTempFile::new()?;
-    fs::copy(db_path, tmp.path())?;
+    let temp_dir = tempfile::tempdir()?;
+    let tmp_db = temp_dir.path().join("Cookies");
+    fs::copy(db_path, &tmp_db)?;
 
-    let conn = Connection::open(tmp.path())?;
+    let wal_path = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+    if wal_path.exists() {
+        let _ = fs::copy(&wal_path, temp_dir.path().join("Cookies-wal"));
+    }
+    let shm_path = std::path::PathBuf::from(format!("{}-shm", db_path.display()));
+    if shm_path.exists() {
+        let _ = fs::copy(&shm_path, temp_dir.path().join("Cookies-shm"));
+    }
+
+    let conn = Connection::open_with_flags(&tmp_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt = conn.prepare(
-        "SELECT encrypted_value FROM cookies WHERE host_key LIKE '%roblox%' AND name = '.ROBLOSECURITY' LIMIT 1",
+        "SELECT value, encrypted_value FROM cookies WHERE host_key LIKE '%roblox%' AND name = '.ROBLOSECURITY' LIMIT 1",
     )?;
 
     let mut rows = stmt.query([])?;
     if let Some(row) = rows.next()? {
-        let enc_bytes: Vec<u8> = row.get(0)?;
+        if let Ok(plain_val) = row.get::<_, String>(0) {
+            let trimmed = plain_val.trim();
+            if !trimmed.is_empty() {
+                let cleaned = trimmed
+                    .trim_end_matches(|c: char| c.is_whitespace() || !c.is_ascii_graphic())
+                    .to_string();
+                if !cleaned.is_empty() {
+                    return Ok(cleaned);
+                }
+            }
+        }
+
+        let enc_bytes: Vec<u8> = row.get(1)?;
         if enc_bytes.starts_with(b"v10") && enc_bytes.len() > 3 {
-            // Password logic: try keyring lookup, default to peanuts
+            // Password logic: try keyring lookups for chrome, chromium, brave, default to peanuts
             let mut passwords = vec![b"peanuts".to_vec()];
-            if let Ok(output) = std::process::Command::new("secret-tool")
-                .args(["lookup", "application", "chrome"])
-                .output()
-            {
-                if output.status.success() && !output.stdout.is_empty() {
-                    let mut pwd = output.stdout;
-                    if pwd.ends_with(b"\n") {
-                        pwd.pop();
+            for app in ["chrome", "chromium", "brave"] {
+                if let Ok(output) = std::process::Command::new("secret-tool")
+                    .args(["lookup", "application", app])
+                    .output()
+                {
+                    if output.status.success() && !output.stdout.is_empty() {
+                        let mut pwd = output.stdout;
+                        while pwd.ends_with(b"\n") || pwd.ends_with(b"\r") {
+                            pwd.pop();
+                        }
+                        if !pwd.is_empty() && !passwords.contains(&pwd) {
+                            passwords.insert(0, pwd);
+                        }
                     }
-                    passwords.insert(0, pwd);
                 }
             }
 
@@ -284,11 +335,15 @@ fn extract_chromium_cookie(db_path: &Path) -> anyhow::Result<String> {
                 if let Ok(decryptor) = Aes128CbcDec::new_from_slices(&key, &iv) {
                     if let Ok(decrypted) = decryptor.decrypt_padded_mut::<Pkcs7>(&mut ciphertext) {
                         let text = String::from_utf8_lossy(decrypted);
-                        if let Some(idx) = text.find("_|WARNING:-DO") {
-                            let cookie = &text[idx..];
-                            let cleaned = cookie
-                                .trim_end_matches(|c: char| c.is_whitespace() || !c.is_ascii_graphic())
-                                .to_string();
+                        let cookie = if let Some(idx) = text.find("_|WARNING:-DO") {
+                            &text[idx..]
+                        } else {
+                            text.trim()
+                        };
+                        let cleaned = cookie
+                            .trim_end_matches(|c: char| c.is_whitespace() || !c.is_ascii_graphic())
+                            .to_string();
+                        if !cleaned.is_empty() {
                             return Ok(cleaned);
                         }
                     }
@@ -300,10 +355,20 @@ fn extract_chromium_cookie(db_path: &Path) -> anyhow::Result<String> {
 }
 
 fn extract_gecko_cookie(db_path: &Path) -> anyhow::Result<String> {
-    let tmp = tempfile::NamedTempFile::new()?;
-    fs::copy(db_path, tmp.path())?;
+    let temp_dir = tempfile::tempdir()?;
+    let tmp_db = temp_dir.path().join("cookies.sqlite");
+    fs::copy(db_path, &tmp_db)?;
 
-    let conn = Connection::open(tmp.path())?;
+    let wal_path = std::path::PathBuf::from(format!("{}-wal", db_path.display()));
+    if wal_path.exists() {
+        let _ = fs::copy(&wal_path, temp_dir.path().join("cookies.sqlite-wal"));
+    }
+    let shm_path = std::path::PathBuf::from(format!("{}-shm", db_path.display()));
+    if shm_path.exists() {
+        let _ = fs::copy(&shm_path, temp_dir.path().join("cookies.sqlite-shm"));
+    }
+
+    let conn = Connection::open_with_flags(&tmp_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut stmt = conn.prepare(
         "SELECT value FROM moz_cookies WHERE host LIKE '%roblox.com' AND name = '.ROBLOSECURITY' LIMIT 1",
     )?;

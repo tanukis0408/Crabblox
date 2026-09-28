@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use adw::prelude::*;
-use gtk4::prelude::*;
 use crate::auth;
 use crate::paths::Paths;
 use crate::runner;
@@ -449,6 +448,7 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                     loop {
                         if let Ok(Some(status)) = session.child.try_wait() {
                             if !seen_roblox && !status.success() {
+                                runner::scan_crash_diagnostics(&session.log_path);
                                 let log_tail = if let Ok(content) = std::fs::read_to_string(&session.log_path) {
                                     let lines: Vec<&str> = content.lines().collect();
                                     let start = lines.len().saturating_sub(8);
@@ -478,6 +478,7 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                         } else if seen_roblox {
                             if last_seen.elapsed().as_secs() >= 4 {
                                 let _ = session.child.kill();
+                                let _ = session.child.wait();
                                 let _ = tx_clone.send_blocking(PlayState::Stopped);
                                 break;
                             }

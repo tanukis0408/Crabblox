@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use adw::prelude::*;
-use gtk4::prelude::*;
 use crate::paths::Paths;
 
 pub fn build_info_page(_window: &adw::ApplicationWindow, paths: Arc<Paths>) -> adw::PreferencesPage {

@@ -25,7 +25,11 @@ enum Commands {
     /// Launch the graphical user interface (default)
     Gui,
     /// Launch Roblox directly via CLI
-    Run,
+    Run {
+        /// Restart Darling container before launching
+        #[arg(long)]
+        restart_darling: bool,
+    },
     /// Sign in to Roblox (from browser or cookie)
     Login {
         /// Import session cookie from installed web browser (Chrome, Firefox, Brave, etc.)
@@ -76,7 +80,11 @@ fn main() -> anyhow::Result<()> {
         Commands::Gui => {
             gui::run_gui(paths);
         }
-        Commands::Run => {
+        Commands::Run { restart_darling } => {
+            if restart_darling {
+                println!("Restarting Darling container daemon...");
+                runner::restart_darling(&paths.darling_prefix);
+            }
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()?;
@@ -194,5 +202,8 @@ async fn run_roblox(paths: Arc<Paths>) -> anyhow::Result<()> {
     let status = session.child.wait()?;
     session.dns.stop();
     println!("Roblox exited with status: {}", status);
+    if !status.success() {
+        runner::scan_crash_diagnostics(&session.log_path);
+    }
     Ok(())
 }

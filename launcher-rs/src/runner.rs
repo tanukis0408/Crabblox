@@ -20,6 +20,7 @@ exec ./RobloxPlayer
 
 pub struct HostAudio {
     pub fifo_path: PathBuf,
+    #[allow(dead_code)]
     pub keep_file: fs::File,
     pub player: Child,
 }
@@ -94,12 +95,14 @@ impl HostAudio {
 impl Drop for HostAudio {
     fn drop(&mut self) {
         let _ = self.player.kill();
+        let _ = self.player.wait();
         let _ = fs::remove_file(&self.fifo_path);
     }
 }
 
 pub struct RobloxSession {
     pub dns: DnsForwarder,
+    #[allow(dead_code)]
     pub audio: Option<HostAudio>,
     pub rpc: Option<crate::discord_rpc::DiscordRpc>,
     pub log_path: PathBuf,
@@ -297,15 +300,20 @@ pub fn restart_darling(prefix: &std::path::Path) {
 
 pub fn roblox_pids() -> Vec<i32> {
     let mut pids = Vec::new();
+    let my_pid = std::process::id() as i32;
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
             let name = entry.file_name();
             if let Ok(pid) = name.to_string_lossy().parse::<i32>() {
+                if pid == my_pid {
+                    continue;
+                }
                 let cmdline = entry.path().join("cmdline");
                 if let Ok(bytes) = fs::read(cmdline) {
                     let cmd = String::from_utf8_lossy(&bytes);
                     if (cmd.contains("RobloxPlayer") || cmd.contains("RobloxCrashHandler"))
                         && !cmd.contains("darling shell")
+                        && !cmd.contains("crabblox")
                     {
                         pids.push(pid);
                     }
@@ -499,19 +507,22 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
 
     // Build the execution command chain:
     // Base command: darling <args...>
-    let mut exec_chain = vec!["darling".to_string()];
+    let darling_cmd = find_binary("darling")
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| "darling".to_string());
+    let mut exec_chain = vec![darling_cmd];
     exec_chain.extend(args);
 
     // If MangoHud is enabled, wrap darling
-    if mangohud_bin.is_some() {
-        let mut wrapped = vec!["mangohud".to_string()];
+    if let Some(ref bin) = mangohud_bin {
+        let mut wrapped = vec![bin.to_string_lossy().to_string()];
         wrapped.extend(exec_chain);
         exec_chain = wrapped;
     }
 
     // If Gamescope is enabled, wrap command with gamescope [--]
-    if gamescope_bin.is_some() {
-        let mut wrapped = vec!["gamescope".to_string()];
+    if let Some(ref bin) = gamescope_bin {
+        let mut wrapped = vec![bin.to_string_lossy().to_string()];
         if let Ok(gs_args) = std::env::var("CRABBLOX_GAMESCOPE_ARGS") {
             wrapped.extend(gs_args.split_whitespace().map(|s| s.to_string()));
         }
@@ -521,8 +532,8 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     }
 
     // If GameMode is enabled, wrap outer command with gamemoderun
-    if gamemode_bin.is_some() {
-        let mut wrapped = vec!["gamemoderun".to_string()];
+    if let Some(ref bin) = gamemode_bin {
+        let mut wrapped = vec![bin.to_string_lossy().to_string()];
         wrapped.extend(exec_chain);
         exec_chain = wrapped;
     }
@@ -752,7 +763,7 @@ mod tests {
 
     #[test]
     fn test_find_binary() {
-        assert!(find_binary("gamemoderun").is_some());
+        assert!(find_binary("sh").is_some());
         assert!(find_binary("nonexistent_binary_xyz_123").is_none());
     }
 

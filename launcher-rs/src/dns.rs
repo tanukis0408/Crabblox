@@ -37,7 +37,10 @@ impl DnsForwarder {
                     recv_res = socket.recv_from(&mut buf) => {
                         let (len, peer) = match recv_res {
                             Ok(res) => res,
-                            Err(_) => break,
+                            Err(_) => {
+                                tokio::time::sleep(Duration::from_millis(10)).await;
+                                continue;
+                            }
                         };
                         if len < 12 {
                             continue;
@@ -60,6 +63,12 @@ impl DnsForwarder {
 
     pub fn stop(&self) {
         let _ = self.shutdown_tx.send(());
+    }
+}
+
+impl Drop for DnsForwarder {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
@@ -241,10 +250,19 @@ fn make_a_response(query: &[u8], ips: &[&str]) -> Vec<u8> {
 
     // Question section
     let mut offset = 12;
-    while offset < query.len() && query[offset] != 0 {
-        offset += 1 + query[offset] as usize;
+    while offset < query.len() {
+        let b = query[offset];
+        if b == 0 {
+            offset += 1;
+            break;
+        }
+        if (b & 0xc0) == 0xc0 {
+            offset += 2;
+            break;
+        }
+        offset += 1 + (b as usize);
     }
-    offset = (offset + 1 + 4).min(query.len());
+    offset = (offset + 4).min(query.len());
     resp.extend_from_slice(&query[12..offset]);
 
     // Answers
@@ -270,10 +288,19 @@ fn make_empty_response(query: &[u8]) -> Vec<u8> {
     resp.extend_from_slice(&[0, 0, 0, 0, 0, 0]); // answers: 0
 
     let mut offset = 12;
-    while offset < query.len() && query[offset] != 0 {
-        offset += 1 + query[offset] as usize;
+    while offset < query.len() {
+        let b = query[offset];
+        if b == 0 {
+            offset += 1;
+            break;
+        }
+        if (b & 0xc0) == 0xc0 {
+            offset += 2;
+            break;
+        }
+        offset += 1 + (b as usize);
     }
-    offset = (offset + 1 + 4).min(query.len());
+    offset = (offset + 4).min(query.len());
     resp.extend_from_slice(&query[12..offset]);
     resp
 }

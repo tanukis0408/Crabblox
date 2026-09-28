@@ -62,46 +62,67 @@ where
 
     if need_download {
         let url = format!("https://setup.rbxcdn.com/mac/{upload}-RobloxPlayer.zip");
-        progress(0.1, "Connecting to download server...");
-
-        let resp = ureq::get(&url)
-            .set("User-Agent", "MacOBlox-rs/Linux")
-            .timeout(std::time::Duration::from_secs(60))
-            .call()?;
-
-        let total_size: usize = resp.header("Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0);
-        let mut reader = resp.into_reader();
-        let mut out = fs::File::create(&part)?;
-
-        let mut buf = [0u8; 65536];
-        let mut downloaded: usize = 0;
-
+        let mut attempts = 0;
+        let max_attempts = 3;
         loop {
-            let n = std::io::Read::read(&mut reader, &mut buf)?;
-            if n == 0 {
-                break;
-            }
-            std::io::Write::write_all(&mut out, &buf[..n])?;
-            downloaded += n;
-            if total_size > 0 {
-                let frac = 0.1 + (downloaded as f32 / total_size as f32) * 0.8;
-                progress(
-                    frac,
-                    &format!(
-                        "Downloading: {} / {} MB",
-                        downloaded >> 20,
-                        total_size >> 20
-                    ),
-                );
+            attempts += 1;
+            progress(0.1, &format!("Connecting to download server (attempt {attempts}/{max_attempts})..."));
+
+            let res: Result<(), anyhow::Error> = (|| {
+                let resp = ureq::get(&url)
+                    .set("User-Agent", "Crabblox/Linux")
+                    .timeout(std::time::Duration::from_secs(60))
+                    .call()?;
+
+                let total_size: usize = resp.header("Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0);
+                let mut reader = resp.into_reader();
+                let mut out = fs::File::create(&part)?;
+
+                let mut buf = [0u8; 65536];
+                let mut downloaded: usize = 0;
+
+                loop {
+                    let n = std::io::Read::read(&mut reader, &mut buf)?;
+                    if n == 0 {
+                        break;
+                    }
+                    std::io::Write::write_all(&mut out, &buf[..n])?;
+                    downloaded += n;
+                    if total_size > 0 {
+                        let frac = 0.1 + (downloaded as f32 / total_size as f32) * 0.8;
+                        progress(
+                            frac,
+                            &format!(
+                                "Downloading: {} / {} MB",
+                                downloaded >> 20,
+                                total_size >> 20
+                            ),
+                        );
+                    }
+                }
+
+                if total_size > 0 && downloaded < total_size {
+                    let _ = fs::remove_file(&part);
+                    anyhow::bail!("Incomplete download: {downloaded}/{total_size} bytes");
+                }
+                Ok(())
+            })();
+
+            match res {
+                Ok(()) => {
+                    fs::rename(&part, &archive)?;
+                    break;
+                }
+                Err(e) => {
+                    let _ = fs::remove_file(&part);
+                    if attempts >= max_attempts {
+                        return Err(e);
+                    }
+                    progress(0.1, &format!("Download failed ({e}), retrying in 2 seconds..."));
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
             }
         }
-
-        if total_size > 0 && downloaded < total_size {
-            let _ = fs::remove_file(&part);
-            anyhow::bail!("Incomplete download: {downloaded}/{total_size} bytes");
-        }
-
-        fs::rename(&part, &archive)?;
     }
 
     progress(0.92, "Unpacking RobloxPlayer.app...");
@@ -129,6 +150,30 @@ where
 
             if file.name().ends_with('/') {
                 fs::create_dir_all(&outpath)?;
+            } else if let Some(mode) = file.unix_mode() {
+                if (mode & 0o170000) == 0o120000 {
+                    // Symlink entry
+                    use std::io::Read;
+                    let mut link_target = String::new();
+                    file.read_to_string(&mut link_target)?;
+                    if let Some(p) = outpath.parent() {
+                        if !p.exists() {
+                            fs::create_dir_all(p)?;
+                        }
+                    }
+                    let _ = fs::remove_file(&outpath);
+                    #[cfg(unix)]
+                    let _ = std::os::unix::fs::symlink(&link_target, &outpath);
+                } else {
+                    if let Some(p) = outpath.parent() {
+                        if !p.exists() {
+                            fs::create_dir_all(p)?;
+                        }
+                    }
+                    let mut outfile = fs::File::create(&outpath)?;
+                    std::io::copy(&mut file, &mut outfile)?;
+                    let _ = fs::set_permissions(&outpath, fs::Permissions::from_mode(mode));
+                }
             } else {
                 if let Some(p) = outpath.parent() {
                     if !p.exists() {
@@ -137,9 +182,6 @@ where
                 }
                 let mut outfile = fs::File::create(&outpath)?;
                 std::io::copy(&mut file, &mut outfile)?;
-                if let Some(mode) = file.unix_mode() {
-                    let _ = fs::set_permissions(&outpath, fs::Permissions::from_mode(mode));
-                }
             }
         }
     }

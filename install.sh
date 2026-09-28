@@ -121,9 +121,13 @@ main() {
   local bin1="$DIR/RobloxPlayer.app/Contents/MacOS/RobloxPlayer"
   local bin2="${XDG_DATA_HOME:-$HOME/.local/share}/Crabblox/RobloxPlayer.app/Contents/MacOS/RobloxPlayer"
   if [[ ! -f "$bin1" && ! -f "$bin2" ]]; then
-    say "Downloading official macOS Roblox client..."
-    if ! "$HOME/.local/bin/crabblox" update; then
-      say "CLI update failed. You can launch Crabblox and click 'Установить Roblox' in the UI."
+    local crabblox_bin="$HOME/.local/bin/crabblox"
+    [[ -x "$crabblox_bin" ]] || crabblox_bin="$DIR/crabblox"
+    if [[ -x "$crabblox_bin" ]]; then
+      say "Downloading official macOS Roblox client..."
+      if ! "$crabblox_bin" update; then
+        say "CLI update failed. You can launch Crabblox and click 'Установить Roblox' in the UI."
+      fi
     fi
   fi
   say "Done. Open Crabblox from the app menu or run 'crabblox'!"
