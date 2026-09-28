@@ -18,22 +18,24 @@ pub fn installed_version(paths: &Paths) -> Option<String> {
 }
 
 pub fn latest_version() -> anyhow::Result<(String, String)> {
-    let url = "https://setup.rbxcdn.com/mac/version";
-    let resp = ureq::get(url)
+    let url = "https://clientsettingscdn.roblox.com/v2/client-version/MacPlayer";
+    let resp: serde_json::Value = ureq::get(url)
+        .set("User-Agent", "Crabblox/Linux")
         .timeout(std::time::Duration::from_secs(10))
         .call()?
-        .into_string()?;
-    let upload = resp.trim().to_string();
+        .into_json()?;
 
-    // Check version-compat API for human version string
-    let compat_url = format!("https://setup.rbxcdn.com/mac/{upload}-version.txt");
-    let human_version = if let Ok(resp) = ureq::get(&compat_url).timeout(std::time::Duration::from_secs(5)).call() {
-        resp.into_string().unwrap_or_else(|_| upload.clone())
-    } else {
-        upload.clone()
-    };
+    let version = resp["version"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'version' in response: {:?}", resp))?
+        .to_string();
 
-    Ok((human_version.trim().to_string(), upload))
+    let upload = resp["clientVersionUpload"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Missing 'clientVersionUpload' in response: {:?}", resp))?
+        .to_string();
+
+    Ok((version, upload))
 }
 
 pub fn update_roblox<F>(paths: &Paths, upload: &str, progress: F) -> anyhow::Result<PathBuf>
