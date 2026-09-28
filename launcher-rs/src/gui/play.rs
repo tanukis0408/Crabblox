@@ -720,7 +720,7 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
     github_btn.add_css_class("circular");
     github_btn.set_tooltip_text(Some("GitHub"));
     github_btn.connect_clicked(|_| {
-        crate::gui::open_uri("https://github.com/narezy/MacOBlox");
+        crate::gui::open_uri("https://github.com/tanukis0408/Crabblox");
     });
     links_box.append(&github_btn);
 

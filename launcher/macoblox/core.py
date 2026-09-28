@@ -788,9 +788,9 @@ def icon_argb_file():
 LAUNCH_SCRIPT = r'''
 project=$1 shim_dir=$2; shift 2
 for kv in "$@"; do export "$kv"; done
-export MESA_SHADER_CACHE_DIR="/home/tanukis/.cache/mesa_shader_cache"
+export MESA_SHADER_CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/mesa_shader_cache"
 export __GL_SHADER_DISK_CACHE=1
-export __GL_SHADER_DISK_CACHE_PATH="/home/tanukis/.cache"
+export __GL_SHADER_DISK_CACHE_PATH="${XDG_CACHE_HOME:-$HOME/.cache}"
 export mesa_glthread=true
 app="$project/RobloxPlayer.app/Contents/MacOS"
 cd "$app" || exit 1

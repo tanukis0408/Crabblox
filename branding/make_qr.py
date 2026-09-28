@@ -9,7 +9,7 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 
 HERE = Path(__file__).resolve().parent
-URL = "https://github.com/narezy/MacOBlox"
+URL = "https://github.com/tanukis0408/Crabblox"
 TOP, BOTTOM = (0x8b, 0x5c, 0xf6), (0x25, 0x63, 0xeb)   # logo gradient
 SCALE, QUIET = 40, 4                                    # px per module, border modules
 

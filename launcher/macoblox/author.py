@@ -13,9 +13,9 @@ from . import core, dns
 NAME = "Monster Dev"
 ROBLOX_USER = "MonsterDev"
 ROBLOX_ID = None
-PROFILE_URL = "https://github.com/narezy/MacOBlox"
+PROFILE_URL = "https://github.com/tanukis0408/Crabblox"
 DISCORD_URL = "https://discord.gg/bpX9rTttCa"
-GITHUB_URL = "https://github.com/narezy/MacOBlox"
+GITHUB_URL = "https://github.com/tanukis0408/Crabblox"
 BOOSTY_URL = "https://boosty.to/ega_link"
 YOOMONEY_URL = "https://yoomoney.ru/to/4100118196133693"
 

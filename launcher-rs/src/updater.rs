@@ -215,9 +215,14 @@ where
     }
 
     if target_bundle.exists() {
-        let _ = fs::rename(&target_bundle, &backup_path);
-        let _ = fs::remove_dir_all(&target_bundle);
+        if fs::rename(&target_bundle, &backup_path).is_err() {
+            let _ = std::process::Command::new("cp")
+                .args(["-a", target_bundle.to_str().unwrap(), backup_path.to_str().unwrap()])
+                .status();
+            let _ = fs::remove_dir_all(&target_bundle);
+        }
     }
+    let _ = fs::remove_dir_all(&target_bundle);
 
     if fs::rename(&new_bundle, &target_bundle).is_err() {
         let status = std::process::Command::new("cp")
@@ -226,6 +231,15 @@ where
         if status.map(|s| !s.success()).unwrap_or(true) {
             anyhow::bail!("Failed to place new RobloxPlayer.app at {:?}", target_bundle);
         }
+    }
+
+    let target_binary = target_bundle.join("Contents/MacOS/RobloxPlayer");
+    if target_binary.exists() {
+        let _ = fs::set_permissions(&target_binary, fs::Permissions::from_mode(0o755));
+    }
+    let target_crash = target_bundle.join("Contents/MacOS/RobloxCrashHandler");
+    if target_crash.exists() {
+        let _ = fs::set_permissions(&target_crash, fs::Permissions::from_mode(0o755));
     }
 
     if !flags.is_empty() {

@@ -5,7 +5,7 @@ pkgver=r1.0000000
 pkgrel=1
 pkgdesc="Run the macOS Roblox client on Linux through Darling"
 arch=('x86_64')
-url="https://github.com/narezy/MacOBlox"
+url="https://github.com/tanukis0408/Crabblox"
 license=('MIT')
 # clang and lld build the shim on first launch, against Darling's own sysroot.
 depends=('darling' 'clang' 'lld' 'unzip' 'pipewire-audio' 'python' 'python-gobject' 'gtk4' 'libadwaita')

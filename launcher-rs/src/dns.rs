@@ -140,7 +140,10 @@ async fn handle_query(
     // Resolve via DNS-over-HTTPS (Google or Quad9)
     let upstream_resp = resolve_doh(&query).await;
     if let Some(raw_resp) = upstream_resp {
-        let sanitized = sanitize_response(&raw_resp);
+        let mut sanitized = sanitize_response(&raw_resp);
+        if sanitized.len() >= 2 && query.len() >= 2 {
+            sanitized[0..2].copy_from_slice(&query[0..2]);
+        }
         let answers_count = if sanitized.len() >= 8 {
             u16::from_be_bytes([sanitized[6], sanitized[7]])
         } else {
@@ -323,7 +326,8 @@ async fn resolve_doh(query: &[u8]) -> Option<Vec<u8>> {
             match resp {
                 Ok(response) => {
                     if response.status() == 200 {
-                        let mut reader = response.into_reader();
+                        use std::io::Read;
+                        let mut reader = response.into_reader().take(65536);
                         let mut out = Vec::new();
                         if std::io::copy(&mut reader, &mut out).is_ok() && out.len() >= 12 {
                             return Some(out);
@@ -351,7 +355,12 @@ fn sanitize_response(response: &[u8]) -> Vec<u8> {
     let answers = u16::from_be_bytes([response[6], response[7]]) as usize;
 
     fn skip_name(data: &[u8], mut pos: usize) -> Option<usize> {
+        let mut jumps = 0;
         while pos < data.len() {
+            jumps += 1;
+            if jumps > 128 {
+                return None;
+            }
             let b = data[pos];
             if b == 0 {
                 return Some(pos + 1);

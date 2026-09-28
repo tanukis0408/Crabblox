@@ -73,6 +73,7 @@ extern void free(void*);
 typedef struct MacOBloxFILE MacOBloxFILE;
 extern MacOBloxFILE* fopen(const char*, const char*);
 extern unsigned long fwrite(const void*, unsigned long, unsigned long, MacOBloxFILE*);
+extern unsigned long fread(void*, unsigned long, unsigned long, MacOBloxFILE*);
 extern int fclose(MacOBloxFILE*);
 
 #define MACOBLOX_SHADER_SLOTS 8192
@@ -1594,7 +1595,6 @@ static void* macoblox_set_window_icon_thread(void* unused) {
     MacOBloxFILE* file = path ? fopen(path, "rb") : 0;
     if (!file)
         return 0;
-    extern unsigned long fread(void*, unsigned long, unsigned long, MacOBloxFILE*);
     unsigned int* words = (unsigned int*)malloc(1 << 22);
     unsigned long count = words ? fread(words, 4, (1 << 22) / 4, file) : 0;
     fclose(file);
@@ -2303,7 +2303,7 @@ static void macoblox_warp_pointer_by(double dx, double dy) {
 
 static MacOBloxPoint macoblox_window_center(id window) {
     // NSRect is returned in memory on x86_64: objc_msgSend_stret, not objc_msgSend.
-    extern void objc_msgSend_stret(void);
+    extern void objc_msgSend_stret(id self, SEL op, ...);
     MacOBloxRect frame = ((MacOBloxRect (*)(id, SEL))objc_msgSend_stret)(
         window, sel_registerName("frame"));
     MacOBloxPoint center = {frame.size.width / 2.0, frame.size.height / 2.0};
@@ -4048,7 +4048,7 @@ static void macoblox_remember_cookie(id cookie, int deleted) {
         MSG2(void, entry, "setObject:forKey:", expires, macoblox_nsstring("Expires"));
         id properties = MSG0(id, cookie, "properties");
         id secure = properties ? MSG1(id, properties, "objectForKey:", macoblox_nsstring("Secure")) : 0;
-        int is_secure = secure && MSG1(MacOBloxBool, secure, "respondsToSelector:", (id)sel_registerName("boolValue"))
+        int is_secure = secure && ((MacOBloxBool (*)(id, SEL, SEL))objc_msgSend)(secure, sel_registerName("respondsToSelector:"), sel_registerName("boolValue"))
             && MSG0(MacOBloxBool, secure, "boolValue");
         MSG2(void, entry, "setObject:forKey:", macoblox_cf_boolean(is_secure), macoblox_nsstring("Secure"));
         MSG2(void, macoblox_saved_cookies, "setObject:forKey:", entry, key);

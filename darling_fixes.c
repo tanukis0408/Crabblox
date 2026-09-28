@@ -234,31 +234,46 @@ struct darwin_passwd {
 };
 extern struct darwin_passwd *getpwuid(unsigned int);
 extern struct darwin_passwd *getpwnam(const char *);
+extern int snprintf(char *, unsigned long, const char *, ...);
+
+static char macoblox_default_home[256] = "/Users/user";
+static char macoblox_default_user[64] = "user";
 
 static struct darwin_passwd macoblox_fake_pw = {
-    "tanukis",
+    macoblox_default_user,
     "*",
     1000,
     1000,
     0,
     "",
-    "Tanukis",
-    "/Users/tanukis",
+    "User",
+    macoblox_default_home,
     "/bin/bash",
     0,
 };
+
+static void macoblox_setup_fake_pw(const char *name_override, unsigned int uid) {
+    const char *user = name_override && name_override[0] ? name_override : getenv("USER");
+    const char *home = getenv("HOME");
+    if (user && user[0]) {
+        snprintf(macoblox_default_user, sizeof(macoblox_default_user), "%s", user);
+        macoblox_fake_pw.pw_name = macoblox_default_user;
+        macoblox_fake_pw.pw_gecos = macoblox_default_user;
+    }
+    if (home && home[0]) {
+        macoblox_fake_pw.pw_dir = (char *)home;
+    } else if (user && user[0]) {
+        snprintf(macoblox_default_home, sizeof(macoblox_default_home), "/Users/%s", user);
+        macoblox_fake_pw.pw_dir = macoblox_default_home;
+    }
+    macoblox_fake_pw.pw_uid = (int)uid;
+}
 
 static struct darwin_passwd *macoblox_getpwuid(unsigned int uid) {
     struct darwin_passwd *res = getpwuid(uid);
     if (res)
         return res;
-    const char *user = getenv("USER");
-    const char *home = getenv("HOME");
-    if (user && user[0])
-        macoblox_fake_pw.pw_name = (char *)user;
-    if (home && home[0])
-        macoblox_fake_pw.pw_dir = (char *)home;
-    macoblox_fake_pw.pw_uid = (int)uid;
+    macoblox_setup_fake_pw(0, uid);
     return &macoblox_fake_pw;
 }
 DYLD_INTERPOSE(macoblox_getpwuid, getpwuid)
@@ -267,14 +282,7 @@ static struct darwin_passwd *macoblox_getpwnam(const char *name) {
     struct darwin_passwd *res = getpwnam(name);
     if (res)
         return res;
-    const char *user = getenv("USER");
-    const char *home = getenv("HOME");
-    if (name && name[0])
-        macoblox_fake_pw.pw_name = (char *)name;
-    else if (user && user[0])
-        macoblox_fake_pw.pw_name = (char *)user;
-    if (home && home[0])
-        macoblox_fake_pw.pw_dir = (char *)home;
+    macoblox_setup_fake_pw(name, 1000);
     return &macoblox_fake_pw;
 }
 DYLD_INTERPOSE(macoblox_getpwnam, getpwnam)

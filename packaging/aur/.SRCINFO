@@ -2,7 +2,7 @@ pkgbase = macoblox-git
 	pkgdesc = Run the macOS Roblox client on Linux through Darling
 	pkgver = r1.0000000
 	pkgrel = 1
-	url = https://github.com/narezy/MacOBlox
+	url = https://github.com/tanukis0408/Crabblox
 	arch = x86_64
 	license = MIT
 	makedepends = git
@@ -17,7 +17,7 @@ pkgbase = macoblox-git
 	depends = libadwaita
 	provides = macoblox
 	conflicts = macoblox
-	source = git+https://github.com/narezy/MacOBlox.git
+	source = git+https://github.com/tanukis0408/Crabblox.git
 	sha256sums = SKIP
 
 pkgname = macoblox-git

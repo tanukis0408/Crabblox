@@ -58,10 +58,89 @@ impl FastFlags {
         }
     }
 
+    pub fn clean_json_str(raw: &str) -> String {
+        let mut out = String::with_capacity(raw.len());
+        let mut in_string = false;
+        let mut escaped = false;
+        let chars: Vec<char> = raw.chars().collect();
+        let mut i = 0;
+
+        while i < chars.len() {
+            let c = chars[i];
+            if in_string {
+                out.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                i += 1;
+            } else {
+                if c == '/' && i + 1 < chars.len() && chars[i + 1] == '/' {
+                    i += 2;
+                    while i < chars.len() && chars[i] != '\n' && chars[i] != '\r' {
+                        i += 1;
+                    }
+                } else if c == '"' {
+                    in_string = true;
+                    out.push(c);
+                    i += 1;
+                } else {
+                    out.push(c);
+                    i += 1;
+                }
+            }
+        }
+
+        let mut final_out = String::with_capacity(out.len());
+        let chars: Vec<char> = out.chars().collect();
+        in_string = false;
+        escaped = false;
+        let mut idx = 0;
+
+        while idx < chars.len() {
+            let c = chars[idx];
+            if in_string {
+                final_out.push(c);
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                idx += 1;
+            } else if c == '"' {
+                in_string = true;
+                final_out.push(c);
+                idx += 1;
+            } else if c == ',' {
+                let mut next_idx = idx + 1;
+                while next_idx < chars.len() && chars[next_idx].is_whitespace() {
+                    next_idx += 1;
+                }
+                if next_idx < chars.len() && (chars[next_idx] == '}' || chars[next_idx] == ']') {
+                    idx += 1;
+                } else {
+                    final_out.push(c);
+                    idx += 1;
+                }
+            } else {
+                final_out.push(c);
+                idx += 1;
+            }
+        }
+
+        final_out
+    }
+
     pub fn load(paths: &Paths) -> Map<String, Value> {
         let file = paths.fast_flags_file();
         if let Ok(content) = fs::read_to_string(&file) {
-            if let Ok(Value::Object(map)) = serde_json::from_str(&content) {
+            let cleaned = Self::clean_json_str(&content);
+            if let Ok(Value::Object(map)) = serde_json::from_str(&cleaned) {
                 return map;
             }
         }
@@ -301,7 +380,8 @@ impl FastFlags {
         if trimmed.is_empty() {
             anyhow::bail!("Строка JSON пуста");
         }
-        let parsed: Value = serde_json::from_str(trimmed)
+        let cleaned = Self::clean_json_str(trimmed);
+        let parsed: Value = serde_json::from_str(&cleaned)
             .map_err(|e| anyhow::anyhow!("Неверный синтаксис JSON: {e}"))?;
         let map = match parsed {
             Value::Object(m) => m,
@@ -434,5 +514,21 @@ mod tests {
         assert_eq!(merged.len(), 3);
         assert_eq!(merged.get("FFlagAnother").unwrap().as_str(), Some("hello"));
         assert_eq!(merged.get("FFlagCustomTest").unwrap().as_bool(), Some(true));
+    }
+
+    #[test]
+    fn test_clean_json_str() {
+        let dirty = r#"{
+            // Comments are removed
+            "flag1": true,
+            "flag2": "value, with, commas", // trailing line comment
+            "flag3": 42,
+        }"#;
+
+        let cleaned = FastFlags::clean_json_str(dirty);
+        let parsed: Value = serde_json::from_str(&cleaned).expect("Should parse cleaned JSON");
+        assert_eq!(parsed["flag1"], true);
+        assert_eq!(parsed["flag2"], "value, with, commas");
+        assert_eq!(parsed["flag3"], 42);
     }
 }
