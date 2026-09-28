@@ -40,7 +40,7 @@ pub fn build_info_page(_window: &adw::ApplicationWindow, paths: Arc<Paths>) -> a
     github_row.add_suffix(&gtk4::Image::from_icon_name("adw-external-link-symbolic"));
 
     github_row.connect_activated(|_| {
-        crate::gui::open_uri("https://github.com/narezy/MacOBlox");
+        crate::gui::open_uri("https://github.com/tanukis0408/Crabblox");
     });
     comm_group.add(&github_row);
 
@@ -63,18 +63,24 @@ pub fn build_info_page(_window: &adw::ApplicationWindow, paths: Arc<Paths>) -> a
         .show_initials(true)
         .build();
 
-    let avatar_path = paths.project_dir.join("branding").join("icons").join("crabblox-128.png");
-    if avatar_path.exists() {
-        let gfile = gio::File::for_path(&avatar_path);
-        if let Ok(texture) = gtk4::gdk::Texture::from_file(&gfile) {
-            avatar.set_custom_image(Some(&texture));
+    let avatar_candidates = [
+        paths.project_dir.join("branding/icons/crabblox-128.png"),
+        paths.data_dir.join("branding/icons/crabblox-128.png"),
+    ];
+    for p in avatar_candidates {
+        if p.exists() {
+            let gfile = gio::File::for_path(&p);
+            if let Ok(texture) = gtk4::gdk::Texture::from_file(&gfile) {
+                avatar.set_custom_image(Some(&texture));
+                break;
+            }
         }
     }
     dev_row.add_prefix(&avatar);
     dev_row.add_suffix(&gtk4::Image::from_icon_name("adw-external-link-symbolic"));
 
     dev_row.connect_activated(|_| {
-        crate::gui::open_uri("https://github.com/narezy/MacOBlox");
+        crate::gui::open_uri("https://github.com/tanukis0408/Crabblox");
     });
     dev_group.add(&dev_row);
 

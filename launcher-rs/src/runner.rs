@@ -9,13 +9,12 @@ use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
 const LAUNCH_SCRIPT: &str = r#"
-project=$1 shim_dir=$2; shift 2
+app_dir=$1 shim_dir=$2; shift 2
 for kv in "$@"; do export "$kv"; done
-app="$project/RobloxPlayer.app/Contents/MacOS"
-cd "$app" || exit 1
+cd "$app_dir" || exit 1
 export DYLD_FORCE_FLAT_NAMESPACE=1
 export DYLD_INSERT_LIBRARIES="$shim_dir/libMacOBloxShims.dylib"
-export DYLD_LIBRARY_PATH="$shim_dir:$app"
+export DYLD_LIBRARY_PATH="$shim_dir:$app_dir"
 exec ./RobloxPlayer
 "#;
 
@@ -113,8 +112,11 @@ impl Drop for RobloxSession {
 
 pub fn ensure_shim(paths: &Paths) -> anyhow::Result<()> {
     let shim = paths.shim_dylib();
-    if !shim.exists() {
-        println!("Building libMacOBloxShims.dylib...");
+    let darling_coreml = paths.darling_prefix.join("System/Library/Frameworks/CoreML.framework");
+    let needs_build = !shim.exists() || !darling_coreml.exists();
+
+    if needs_build {
+        println!("Building libMacOBloxShims.dylib and stub frameworks...");
         let script = paths.project_dir.join("build_debug_shim.sh");
         if script.exists() {
             let status = Command::new("bash")
@@ -136,7 +138,11 @@ pub fn ensure_shim(paths: &Paths) -> anyhow::Result<()> {
 
     for name in frameworks {
         let dest = darling_frameworks.join(format!("{name}.framework"));
-        let src = paths.project_dir.join(format!("build/frameworks/{name}.framework"));
+        let src = if paths.project_dir.join(format!("build/frameworks/{name}.framework")).exists() {
+            paths.project_dir.join(format!("build/frameworks/{name}.framework"))
+        } else {
+            paths.data_dir.join(format!("build/frameworks/{name}.framework"))
+        };
         if src.exists() && !dest.exists() {
             let _ = Command::new("cp")
                 .args(["-r", src.to_str().unwrap(), dest.to_str().unwrap()])
@@ -343,7 +349,14 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     let log_file = fs::File::create(&log_path)?;
 
     let shim_parent = paths.shim_dylib().parent().unwrap().to_path_buf();
-    let darling_project = format!("/Volumes/SystemRoot{}", paths.data_dir.canonicalize()?.display());
+    fs::create_dir_all(&paths.data_dir)?;
+    fs::create_dir_all(&shim_parent)?;
+
+    let app_macos = paths.app_bundle().join("Contents/MacOS");
+    if !app_macos.exists() {
+        anyhow::bail!("RobloxPlayer.app/Contents/MacOS does not exist at {:?}", app_macos);
+    }
+    let darling_app_dir = format!("/Volumes/SystemRoot{}", app_macos.canonicalize()?.display());
     let darling_shim_dir = format!("/Volumes/SystemRoot{}", shim_parent.canonicalize()?.display());
 
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
@@ -356,7 +369,7 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         "-c".into(),
         LAUNCH_SCRIPT.into(),
         "macoblox".into(),
-        darling_project,
+        darling_app_dir,
         darling_shim_dir,
         format!("MACOBLOX_DNS={}", dns_address),
         format!("MESA_SHADER_CACHE_DIR={}", shader_cache.display()),
@@ -389,6 +402,8 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     }
     if let Ok(display) = std::env::var("DISPLAY") {
         cmd.env("DISPLAY", display);
+    } else {
+        cmd.env("DISPLAY", ":0");
     }
     if let Ok(wayland) = std::env::var("WAYLAND_DISPLAY") {
         cmd.env("WAYLAND_DISPLAY", wayland);

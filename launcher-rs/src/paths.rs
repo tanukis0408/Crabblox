@@ -80,7 +80,13 @@ impl Paths {
     }
 
     pub fn app_bundle(&self) -> PathBuf {
-        self.data_dir.join("RobloxPlayer.app")
+        if self.data_dir.join("RobloxPlayer.app").exists() {
+            self.data_dir.join("RobloxPlayer.app")
+        } else if self.project_dir.join("RobloxPlayer.app").exists() {
+            self.project_dir.join("RobloxPlayer.app")
+        } else {
+            self.data_dir.join("RobloxPlayer.app")
+        }
     }
 
     pub fn shim_dylib(&self) -> PathBuf {
@@ -95,18 +101,21 @@ impl Paths {
 
     pub fn cookies_plist(&self) -> PathBuf {
         let username = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+        let macoblox = self.darling_prefix
+            .join("Users")
+            .join(&username)
+            .join("Library/MacOBlox/Cookies.plist");
+        if macoblox.exists() {
+            return macoblox;
+        }
         let crabblox = self.darling_prefix
             .join("Users")
             .join(&username)
             .join("Library/Crabblox/Cookies.plist");
         if crabblox.exists() {
-            crabblox
-        } else {
-            self.darling_prefix
-                .join("Users")
-                .join(&username)
-                .join("Library/MacOBlox/Cookies.plist")
+            return crabblox;
         }
+        macoblox
     }
 
     pub fn fast_flags_file(&self) -> PathBuf {

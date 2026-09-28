@@ -33,6 +33,8 @@ fn build_window(app: &adw::Application, paths: Arc<Paths>) {
         let theme = gtk4::IconTheme::for_display(&display);
         theme.add_search_path(paths.project_dir.join("branding").join("icons"));
         theme.add_search_path(paths.project_dir.join("launcher").join("icons"));
+        theme.add_search_path(paths.data_dir.join("branding").join("icons"));
+        theme.add_search_path(paths.data_dir.join("launcher").join("icons"));
     }
     gtk4::Window::set_default_icon_name("crabblox");
 

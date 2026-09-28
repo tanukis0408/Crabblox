@@ -5,7 +5,12 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 pub fn installed_version(paths: &Paths) -> Option<String> {
-    let plist_path = paths.app_bundle().join("Contents/Info.plist");
+    let bundle = paths.app_bundle();
+    let binary = bundle.join("Contents/MacOS/RobloxPlayer");
+    if !binary.exists() {
+        return None;
+    }
+    let plist_path = bundle.join("Contents/Info.plist");
     if !plist_path.exists() {
         return None;
     }
@@ -139,10 +144,20 @@ where
         }
     }
 
-    if !new_bundle.is_dir() {
-        anyhow::bail!("Archive does not contain RobloxPlayer.app");
+    let binary = new_bundle.join("Contents/MacOS/RobloxPlayer");
+    if binary.exists() {
+        let _ = fs::set_permissions(&binary, fs::Permissions::from_mode(0o755));
+    }
+    let crash_handler = new_bundle.join("Contents/MacOS/RobloxCrashHandler");
+    if crash_handler.exists() {
+        let _ = fs::set_permissions(&crash_handler, fs::Permissions::from_mode(0o755));
     }
 
+    if !new_bundle.is_dir() || !binary.exists() {
+        anyhow::bail!("Archive does not contain a valid RobloxPlayer.app");
+    }
+
+    let flags = crate::fast_flags::FastFlags::load(paths);
     let old_version = installed_version(paths).unwrap_or_else(|| "unknown".to_string());
     let backups = paths.backups_dir();
     fs::create_dir_all(&backups)?;
@@ -153,11 +168,28 @@ where
     }
 
     let target_bundle = paths.app_bundle();
-    if target_bundle.exists() {
-        fs::rename(&target_bundle, &backup_path)?;
+    if let Some(parent) = target_bundle.parent() {
+        fs::create_dir_all(parent)?;
     }
 
-    fs::rename(&new_bundle, &target_bundle)?;
+    if target_bundle.exists() {
+        let _ = fs::rename(&target_bundle, &backup_path);
+        let _ = fs::remove_dir_all(&target_bundle);
+    }
+
+    if fs::rename(&new_bundle, &target_bundle).is_err() {
+        let status = std::process::Command::new("cp")
+            .args(["-a", new_bundle.to_str().unwrap(), target_bundle.to_str().unwrap()])
+            .status();
+        if status.map(|s| !s.success()).unwrap_or(true) {
+            anyhow::bail!("Failed to place new RobloxPlayer.app at {:?}", target_bundle);
+        }
+    }
+
+    if !flags.is_empty() {
+        let _ = crate::fast_flags::FastFlags::save(paths, &flags);
+    }
+
     progress(1.0, "Done");
 
     Ok(backup_path)

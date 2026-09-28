@@ -187,6 +187,79 @@ pub fn build_settings_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -
         .title("Установленная версия")
         .subtitle(&version_str)
         .build();
+
+    let update_btn = gtk4::Button::with_label("Обновить");
+    update_btn.add_css_class("suggested-action");
+    update_btn.set_valign(gtk4::Align::Center);
+
+    let paths_up = paths.clone();
+    let win_up = window.downgrade();
+    let vrow_weak = version_row.downgrade();
+    let btn_weak = update_btn.downgrade();
+
+    update_btn.connect_clicked(move |_| {
+        let p = paths_up.clone();
+        let w_opt = win_up.upgrade();
+        let vr_opt = vrow_weak.upgrade();
+        let b_opt = btn_weak.upgrade();
+
+        if let Some(ref b) = b_opt {
+            b.set_sensitive(false);
+            b.set_label("Проверка…");
+        }
+
+        let (tx, rx) = async_channel::bounded::<Result<(String, bool), String>>(1);
+
+        std::thread::spawn(move || {
+            let res = (|| -> anyhow::Result<(String, bool)> {
+                let (latest_ver, upload) = updater::latest_version()?;
+                let installed = updater::installed_version(&p);
+                if installed.as_deref() != Some(&latest_ver) {
+                    updater::update_roblox(&p, &upload, |_, _| {})?;
+                    Ok((latest_ver, true))
+                } else {
+                    Ok((latest_ver, false))
+                }
+            })();
+
+            let _ = tx.send_blocking(res.map_err(|e| e.to_string()));
+        });
+
+        glib::spawn_future_local(async move {
+            if let Ok(res) = rx.recv().await {
+                if let Some(b) = b_opt {
+                    b.set_sensitive(true);
+                    b.set_label("Обновить");
+                }
+                match res {
+                    Ok((ver, updated)) => {
+                        if let Some(vr) = vr_opt {
+                            vr.set_subtitle(&ver);
+                        }
+                        if let Some(w) = w_opt {
+                            let msg = if updated {
+                                format!("Roblox успешно обновлен до версии {ver}")
+                            } else {
+                                format!("У вас уже установлена актуальная версия {ver}")
+                            };
+                            let d = adw::AlertDialog::new(Some("Обновление Roblox"), Some(&msg));
+                            d.add_response("ok", "OK");
+                            d.present(Some(&w));
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(w) = w_opt {
+                            let d = adw::AlertDialog::new(Some("Ошибка обновления"), Some(&e));
+                            d.add_response("ok", "OK");
+                            d.present(Some(&w));
+                        }
+                    }
+                }
+            }
+        });
+    });
+
+    version_row.add_suffix(&update_btn);
     roblox_group.add(&version_row);
 
     page.add(&roblox_group);

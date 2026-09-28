@@ -30,11 +30,12 @@ Comment=Run Roblox on Linux through Darling (by Monster Dev)
 Comment[ru]=Запуск клиента Roblox для macOS на Linux через Darling (Monster Dev)
 GenericName=Roblox launcher
 GenericName[ru]=Лаунчер Roblox
-Exec=$HOME/.local/bin/crabblox
+Exec=$HOME/.local/bin/crabblox %u
 Icon=crabblox
 Terminal=false
 Categories=Game;
 Keywords=roblox;darling;crabblox;
+MimeType=x-scheme-handler/roblox-player;
 StartupNotify=true
 DESKTOP
 
@@ -46,11 +47,12 @@ Comment=Run Roblox on Linux through Darling (by Monster Dev)
 Comment[ru]=Запуск клиента Roblox для macOS на Linux через Darling (Monster Dev)
 GenericName=Roblox launcher
 GenericName[ru]=Лаунчер Roblox
-Exec=$launcher_dir/macoblox-launcher
+Exec=$HOME/.local/bin/crabblox %u
 Icon=crabblox
 Terminal=false
 Categories=Game;
 Keywords=roblox;darling;crabblox;
+MimeType=x-scheme-handler/roblox-player;
 StartupNotify=true
 DESKTOP
 
@@ -70,8 +72,9 @@ MimeType=x-scheme-handler/roblox-studio;x-scheme-handler/roblox-studio-auth;appl
 StartupWMClass=robloxstudiobeta.exe
 DESKTOP
 if command -v xdg-mime >/dev/null; then
+  xdg-mime default crabblox.desktop x-scheme-handler/roblox-player || true
   for type in x-scheme-handler/roblox-studio x-scheme-handler/roblox-studio-auth; do
-    xdg-mime default xyz.narez.MacOBlox.Studio.desktop "$type"
+    xdg-mime default xyz.narez.MacOBlox.Studio.desktop "$type" || true
   done
 fi
 
@@ -80,7 +83,7 @@ cat > "$data_home/applications/macoblox-roblox-window.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Roblox (Crabblox)
-Exec=$launcher_dir/macoblox-launcher
+Exec=$HOME/.local/bin/crabblox
 Icon=crabblox
 NoDisplay=true
 StartupWMClass=RobloxPlayer

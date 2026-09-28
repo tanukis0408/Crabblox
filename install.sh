@@ -108,14 +108,18 @@ main() {
     printf '%s\n' "$output" >&2
     die "Could not build the shim."
   fi
-  if command -v cargo >/dev/null && [[ -d "$DIR/launcher-rs" && ! -f "$DIR/crabblox" ]]; then
-    say "Building Crabblox Rust launcher"
+  if command -v cargo >/dev/null && [[ -d "$DIR/launcher-rs" ]]; then
+    say "Building Crabblox Rust launcher (cargo)"
     (cd "$DIR" && cargo build --release --manifest-path launcher-rs/Cargo.toml && cp launcher-rs/target/release/crabblox "$DIR/crabblox") || true
   fi
   "$DIR/launcher/install.sh"
-  if [[ ! -d "$DIR/RobloxPlayer.app" && ! -d "${XDG_DATA_HOME:-$HOME/.local/share}/Crabblox/RobloxPlayer.app" ]]; then
+  local bin1="$DIR/RobloxPlayer.app/Contents/MacOS/RobloxPlayer"
+  local bin2="${XDG_DATA_HOME:-$HOME/.local/share}/Crabblox/RobloxPlayer.app/Contents/MacOS/RobloxPlayer"
+  if [[ ! -f "$bin1" && ! -f "$bin2" ]]; then
     say "Downloading official macOS Roblox client..."
-    "$HOME/.local/bin/crabblox" update || true
+    if ! "$HOME/.local/bin/crabblox" update; then
+      say "CLI update failed. You can launch Crabblox and click 'Установить Roblox' in the UI."
+    fi
   fi
   say "Done. Open Crabblox from the app menu or run 'crabblox'!"
 }
