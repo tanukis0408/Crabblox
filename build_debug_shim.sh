@@ -41,7 +41,7 @@ for name in CoreML CoreHaptics DeviceCheck; do
 done
 printf 'Built: %s\n' "$build_dir/frameworks"
 
-if [[ -d "$project_dir/prebuilt" ]]; then
+if [[ -d "$project_dir/prebuilt" && -n "${MACOBLOX_UPDATE_PREBUILT:-}" ]]; then
   cp "$build_dir/libMacOBloxShims.dylib" "$project_dir/prebuilt/libMacOBloxShims.dylib"
   mkdir -p "$project_dir/prebuilt/frameworks"
   cp -a "$build_dir/frameworks/." "$project_dir/prebuilt/frameworks/" 2>/dev/null || true

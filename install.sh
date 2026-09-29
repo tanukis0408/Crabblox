@@ -95,7 +95,13 @@ main() {
 
   if [[ -d $DIR/.git ]]; then
     say "Updating Crabblox"
-    git -C "$DIR" pull --ff-only
+    # Discard any local modifications to prebuilt binaries or compiled crabblox
+    git -C "$DIR" checkout -- crabblox prebuilt/ 2>/dev/null || true
+    if ! git -C "$DIR" pull --ff-only; then
+      say "Fast-forward failed, resetting local binary state to remote..."
+      git -C "$DIR" fetch origin main
+      git -C "$DIR" reset --hard origin/main
+    fi
   else
     say "Downloading Crabblox"
     git clone --depth 1 "$REPO" "$DIR"
