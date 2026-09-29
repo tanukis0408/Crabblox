@@ -10,12 +10,19 @@ use std::process::{Child, Command, Stdio};
 
 const LAUNCH_SCRIPT: &str = r#"
 app_dir=$1 shim_dir=$2; shift 2
-for kv in "$@"; do export "$kv"; done
+extra_args=()
+for kv in "$@"; do
+    if [[ "$kv" == --* ]] || [[ "$kv" == roblox-player:* ]]; then
+        extra_args+=("$kv")
+    else
+        export "$kv"
+    fi
+done
 cd "$app_dir" || exit 1
 export DYLD_FORCE_FLAT_NAMESPACE=1
 export DYLD_INSERT_LIBRARIES="$shim_dir/libMacOBloxShims.dylib"
 export DYLD_LIBRARY_PATH="$shim_dir:$app_dir"
-exec ./RobloxPlayer
+exec ./RobloxPlayer "${extra_args[@]}"
 "#;
 
 pub struct HostAudio {
@@ -552,6 +559,9 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         eprintln!("Warning: failed to ensure compatibility FastFlags: {e}");
     }
 
+    // Ensure session cookie is present and restored into Darling prefix
+    let _ = crate::auth::ensure_session_restored(paths);
+
     // Clean any stale Darling mounts or state
     clear_stale_darling(&paths.darling_prefix);
 
@@ -591,7 +601,7 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     let log_path = logs_dir.join(format!("launch-{timestamp}.log"));
     let log_file = fs::File::create(&log_path)?;
 
-    let shim_parent = paths.shim_dylib().parent().unwrap().to_path_buf();
+    let shim_parent = paths.shim_dylib().parent().map(|p| p.to_path_buf()).unwrap_or_else(|| paths.project_dir.clone());
     fs::create_dir_all(&paths.data_dir)?;
     fs::create_dir_all(&shim_parent)?;
 
@@ -647,6 +657,13 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         args.push(format!("MACOBLOX_AUDIO_FIFO=/Volumes/SystemRoot{}", a.fifo_path.display()));
     } else {
         args.push("MACOBLOX_AUDIO=0".into());
+    }
+
+    // Pass deep link launch URL or place ID if provided
+    if let Ok(url) = std::env::var("MACOBLOX_LAUNCH_URL") {
+        if !url.trim().is_empty() {
+            args.push(url.trim().to_string());
+        }
     }
 
     // Check wrapper tools: GameMode, Gamescope, MangoHud

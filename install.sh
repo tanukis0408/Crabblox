@@ -19,7 +19,7 @@ install_arch() {
   # Only packages that are not installed at all: asking pacman for an
   # installed but outdated one (pipewire-audio 1.6.8 with 1.6.9 in the repo)
   # makes it a partial upgrade that breaks on pinned dependencies.
-  local wanted=(git base-devel clang lld unzip python python-gobject gtk4 libadwaita)
+  local wanted=(git base-devel clang lld unzip python python-gobject gtk4 libadwaita rust)
   command -v pw-cat >/dev/null || wanted+=(pipewire-audio)
   local missing
   missing=$(pacman -T "${wanted[@]}" || true)
@@ -48,7 +48,7 @@ install_debian() {
   say "Installing tools (apt)"
   sudo apt-get update
   sudo apt-get install -y git curl unzip clang lld pipewire-bin python3 python3-gi \
-    gir1.2-gtk-4.0 gir1.2-adw-1
+    gir1.2-gtk-4.0 gir1.2-adw-1 cargo
   command -v darling >/dev/null && return
   # The release page redirects to the newest tag, v0.1.YYYYMMDD; its Debian
   # packages (built for Ubuntu 24.04) come as debs_YYYYMMDD.zip.
@@ -66,7 +66,7 @@ install_debian() {
 
 install_fedora() {
   say "Installing tools (dnf)"
-  sudo dnf install -y git clang lld unzip pipewire-utils python3-gobject gtk4 libadwaita
+  sudo dnf install -y git clang lld unzip pipewire-utils python3-gobject gtk4 libadwaita cargo
 }
 
 main() {
@@ -105,21 +105,22 @@ main() {
     if git -C "$DIR" fetch --prune origin main 2>/dev/null && \
        git -C "$DIR" checkout -B main origin/main 2>/dev/null && \
        git -C "$DIR" reset --hard origin/main 2>/dev/null; then
-      # Clean untracked residue, preserving user data like RobloxPlayer.app, downloads, and backups
-      git -C "$DIR" clean -fd -e "RobloxPlayer.app" -e "downloads" -e "backups" 2>/dev/null || true
+      # Clean untracked residue, preserving user data, prebuilt binaries, cookies, and backups
+      git -C "$DIR" clean -fd -e "RobloxPlayer.app" -e "downloads" -e "backups" -e "build" -e "Cookies.plist" -e "*.plist" -e "accounts.json" -e "launcher-rs/target" 2>/dev/null || true
     else
-      say "Repository in $DIR has conflicts or corruption, performing full clean re-sync..."
-      local tmp_save
-      tmp_save=$(mktemp -d)
-      [[ -d "$DIR/RobloxPlayer.app" ]] && mv "$DIR/RobloxPlayer.app" "$tmp_save/" 2>/dev/null || true
-      [[ -d "$DIR/downloads" ]] && mv "$DIR/downloads" "$tmp_save/" 2>/dev/null || true
-      [[ -d "$DIR/backups" ]] && mv "$DIR/backups" "$tmp_save/" 2>/dev/null || true
-      rm -rf "$DIR"
-      git clone --depth 1 "$REPO" "$DIR"
-      [[ -d "$tmp_save/RobloxPlayer.app" ]] && mv "$tmp_save/RobloxPlayer.app" "$DIR/" 2>/dev/null || true
-      [[ -d "$tmp_save/downloads" ]] && mv "$tmp_save/downloads" "$DIR/" 2>/dev/null || true
-      [[ -d "$tmp_save/backups" ]] && mv "$tmp_save/backups" "$DIR/" 2>/dev/null || true
-      rm -rf "$tmp_save"
+      say "Repository in $DIR has conflicts or corruption, performing safe clean re-sync..."
+      local tmp_clone
+      tmp_clone=$(mktemp -d)
+      if git clone --depth 1 "$REPO" "$tmp_clone/repo" 2>/dev/null; then
+        rm -rf "$DIR/.git"
+        cp -a "$tmp_clone/repo/.git" "$DIR/.git"
+        git -C "$DIR" reset --hard origin/main 2>/dev/null || true
+        git -C "$DIR" clean -fd -e "RobloxPlayer.app" -e "downloads" -e "backups" -e "build" -e "Cookies.plist" -e "*.plist" -e "accounts.json" -e "launcher-rs/target" 2>/dev/null || true
+        rm -rf "$tmp_clone"
+      else
+        rm -rf "$tmp_clone"
+        say "Warning: network error during repository sync; proceeding with current files."
+      fi
     fi
   else
     say "Downloading Crabblox"
@@ -143,7 +144,7 @@ main() {
     say "Building Crabblox Rust launcher (cargo)"
     (cd "$DIR" && cargo build --release --manifest-path launcher-rs/Cargo.toml && cp launcher-rs/target/release/crabblox "$DIR/crabblox") || true
   fi
-  "$DIR/launcher/install.sh"
+  bash "$DIR/launcher/install.sh"
   local bin1="$DIR/RobloxPlayer.app/Contents/MacOS/RobloxPlayer"
   local bin2="${XDG_DATA_HOME:-$HOME/.local/share}/Crabblox/RobloxPlayer.app/Contents/MacOS/RobloxPlayer"
   if [[ ! -f "$bin1" && ! -f "$bin2" ]]; then

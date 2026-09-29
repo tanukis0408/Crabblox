@@ -651,33 +651,104 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
 
             dialog.connect_response(None, move |_, resp| {
                 if resp == "browser" {
-                    match auth::import_browser_cookies(&p) {
-                        Ok(Some((user, browser))) => {
-                            if let Some(st_up) = st.upgrade() {
-                                let v = updater::installed_version(&p).unwrap_or_else(|| "не найден".to_string());
-                                st_up.set_description(Some(&format!(
-                                    "Roblox {} • Вход выполнен: {} ({})",
-                                    v, user, browser
-                                )));
+                    let (tx, rx) = async_channel::bounded(1);
+                    let p_bg = p.clone();
+                    std::thread::spawn(move || {
+                        let res = auth::import_browser_cookies(&p_bg);
+                        let _ = tx.send_blocking(res);
+                    });
+                    let st_ui = st.clone();
+                    let win_ui = win_resp.clone();
+                    let p_ui = p.clone();
+                    glib::spawn_future_local(async move {
+                        if let Ok(res) = rx.recv().await {
+                            match res {
+                                Ok(Some((user, browser))) => {
+                                    if let Some(st_up) = st_ui.upgrade() {
+                                        let v = updater::installed_version(&p_ui).unwrap_or_else(|| "не найден".to_string());
+                                        st_up.set_description(Some(&format!(
+                                            "Roblox {} • Вход выполнен: {} ({})",
+                                            v, user, browser
+                                        )));
+                                    }
+                                }
+                                Ok(None) => {
+                                    let err_dialog = adw::AlertDialog::new(
+                                        Some("Сессия не найдена"),
+                                        Some("Не найдено активных сессий Roblox. Убедитесь, что вы авторизованы на roblox.com в вашем браузере (Chrome, Chromium, Firefox, Brave, Edge, Opera, Zen и др.), либо введите куки вручную.")
+                                    );
+                                    err_dialog.add_response("ok", "Понятно");
+                                    err_dialog.present(Some(&win_ui));
+                                }
+                                Err(e) => {
+                                    let err_dialog = adw::AlertDialog::new(
+                                        Some("Ошибка входа"),
+                                        Some(&format!("Не удалось получить куки: {}", e))
+                                    );
+                                    err_dialog.add_response("ok", "Понятно");
+                                    err_dialog.present(Some(&win_ui));
+                                }
                             }
                         }
-                        Ok(None) => {
-                            let err_dialog = adw::AlertDialog::new(
-                                Some("Сессия не найдена"),
-                                Some("Не найдено активных сессий Roblox. Убедитесь, что вы авторизованы на roblox.com в вашем браузере (Chrome, Chromium, Firefox, Brave, Edge, Opera, Zen и др.), либо введите куки вручную.")
-                            );
-                            err_dialog.add_response("ok", "Понятно");
-                            err_dialog.present(Some(&win_resp));
+                    });
+                } else if resp == "manual" {
+                    let entry_dialog = adw::AlertDialog::new(
+                        Some("Ввод .ROBLOSECURITY"),
+                        Some("Вставьте куки .ROBLOSECURITY для входа в ваш аккаунт:")
+                    );
+                    let cookie_entry = gtk4::Entry::new();
+                    cookie_entry.set_placeholder_text(Some("_|WARNING:-DO-NOT-SHARE-THIS..."));
+                    cookie_entry.set_visibility(false);
+                    entry_dialog.set_extra_child(Some(&cookie_entry));
+                    entry_dialog.add_response("save", "Войти");
+                    entry_dialog.add_response("cancel", "Отмена");
+                    entry_dialog.set_default_response(Some("save"));
+
+                    let p_manual = p.clone();
+                    let st_manual = st.clone();
+                    let win_manual = win_resp.clone();
+
+                    entry_dialog.connect_response(None, move |_, r| {
+                        if r == "save" {
+                            let text = cookie_entry.text().to_string();
+                            if text.trim().is_empty() {
+                                return;
+                            }
+                            let (tx, rx) = async_channel::bounded(1);
+                            let p_bg = p_manual.clone();
+                            std::thread::spawn(move || {
+                                let res = auth::save_session_cookie(&p_bg, &text);
+                                let _ = tx.send_blocking(res);
+                            });
+                            let st_ui = st_manual.clone();
+                            let win_ui = win_manual.clone();
+                            let p_ui = p_manual.clone();
+                            glib::spawn_future_local(async move {
+                                if let Ok(res) = rx.recv().await {
+                                    match res {
+                                        Ok(user) => {
+                                            if let Some(st_up) = st_ui.upgrade() {
+                                                let v = updater::installed_version(&p_ui).unwrap_or_else(|| "не найден".to_string());
+                                                st_up.set_description(Some(&format!(
+                                                    "Roblox {} • Вход выполнен: {}",
+                                                    v, user
+                                                )));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            let err_dialog = adw::AlertDialog::new(
+                                                Some("Ошибка авторизации"),
+                                                Some(&format!("Не удалось сохранить куки: {}", e))
+                                            );
+                                            err_dialog.add_response("ok", "Понятно");
+                                            err_dialog.present(Some(&win_ui));
+                                        }
+                                    }
+                                }
+                            });
                         }
-                        Err(e) => {
-                            let err_dialog = adw::AlertDialog::new(
-                                Some("Ошибка входа"),
-                                Some(&format!("Не удалось получить куки: {}", e))
-                            );
-                            err_dialog.add_response("ok", "Понятно");
-                            err_dialog.present(Some(&win_resp));
-                        }
-                    }
+                    });
+                    entry_dialog.present(Some(&win_resp));
                 }
             });
 

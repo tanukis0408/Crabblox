@@ -1162,8 +1162,6 @@ static int macoblox_getaddrinfo(const char* node, const char* service,
         return own;
     int (*real_getaddrinfo)(const char*, const char*, const void*, void**) =
         (int (*)(const char*, const char*, const void*, void**))dlsym(RTLD_NEXT, "getaddrinfo");
-    while (__sync_lock_test_and_set(&macoblox_dns_lock, 1))
-        usleep(1000);
 
     int status = -1;
     int attempts = 0;
@@ -1177,10 +1175,10 @@ static int macoblox_getaddrinfo(const char* node, const char* service,
             usleep(50000);
         }
     }
-    __sync_lock_release(&macoblox_dns_lock);
 
-    // Sanitize any blocked Cloudflare IPs if system resolver returned them for Roblox domains
-    if (status == 0 && result && *result && node && ascii_contains_case_insensitive(node, "roblox.com")) {
+    // Sanitize any blocked Cloudflare IPs if system resolver returned them for Roblox domains (except auth.roblox.com which is CF-only)
+    if (status == 0 && result && *result && node && ascii_contains_case_insensitive(node, "roblox.com") &&
+        !ascii_contains_case_insensitive(node, "auth.roblox.com")) {
         struct macoblox_darwin_addrinfo* curr = (struct macoblox_darwin_addrinfo*)(*result);
         while (curr) {
             if (curr->ai_family == 2 /* AF_INET */ && curr->ai_addr) {
@@ -4029,6 +4027,7 @@ static id macoblox_cookie_file(void) {
     return MSG1(id, directory, "stringByAppendingPathComponent:", macoblox_nsstring("Cookies.plist"));
 }
 
+static volatile int macoblox_cookie_lock;
 static volatile int macoblox_loading_cookies;
 // Persistent cookies as Roblox hands them to NSHTTPCookieStorage, keyed by
 // domain|path|name. Darling's storage cannot be read back for this: in
@@ -4042,7 +4041,9 @@ static id macoblox_cookie_key(id domain, id path, id name) {
         path ? path : macoblox_nsstring("/"), name ? name : macoblox_nsstring(""));
 }
 
-static void macoblox_write_saved_cookies(void) {
+static void macoblox_write_saved_cookies_locked(void) {
+    if (!macoblox_saved_cookies)
+        return;
     id file = macoblox_cookie_file();
     id entries = MSG0(id, macoblox_saved_cookies, "allValues");
     ((MacOBloxBool (*)(id, SEL, id, MacOBloxBool))objc_msgSend)(
@@ -4050,54 +4051,75 @@ static void macoblox_write_saved_cookies(void) {
     chmod(MSG0(const char*, file, "fileSystemRepresentation"), 0600);
 
     id home = ((id (*)(void))dlsym(RTLD_DEFAULT, "NSHomeDirectory"))();
-    id crab_dir = MSG1(id, home, "stringByAppendingPathComponent:",
-                       macoblox_nsstring("Library/Crabblox"));
-    ((MacOBloxBool (*)(id, SEL, id, MacOBloxBool, id, id*))objc_msgSend)(
-        MSG0(id, objc_getClass("NSFileManager"), "defaultManager"),
-        sel_registerName("createDirectoryAtPath:withIntermediateDirectories:attributes:error:"),
-        crab_dir, 1, 0, 0);
-    id crab_file = MSG1(id, crab_dir, "stringByAppendingPathComponent:", macoblox_nsstring("Cookies.plist"));
-    ((MacOBloxBool (*)(id, SEL, id, MacOBloxBool))objc_msgSend)(
-        entries, sel_registerName("writeToFile:atomically:"), crab_file, 0);
-    chmod(MSG0(const char*, crab_file, "fileSystemRepresentation"), 0600);
+    if (home) {
+        id crab_dir = MSG1(id, home, "stringByAppendingPathComponent:",
+                           macoblox_nsstring("Library/Crabblox"));
+        ((MacOBloxBool (*)(id, SEL, id, MacOBloxBool, id, id*))objc_msgSend)(
+            MSG0(id, objc_getClass("NSFileManager"), "defaultManager"),
+            sel_registerName("createDirectoryAtPath:withIntermediateDirectories:attributes:error:"),
+            crab_dir, 1, 0, 0);
+        id crab_file = MSG1(id, crab_dir, "stringByAppendingPathComponent:", macoblox_nsstring("Cookies.plist"));
+        ((MacOBloxBool (*)(id, SEL, id, MacOBloxBool))objc_msgSend)(
+            entries, sel_registerName("writeToFile:atomically:"), crab_file, 0);
+        chmod(MSG0(const char*, crab_file, "fileSystemRepresentation"), 0600);
+    }
 }
 
 static void macoblox_remember_cookie(id cookie, int deleted) {
     if (!cookie || macoblox_loading_cookies)
         return;
-    if (!macoblox_saved_cookies)
-        macoblox_saved_cookies = MSG0(id, MSG0(id, objc_getClass("NSMutableDictionary"), "alloc"), "init");
     id name = MSG0(id, cookie, "name");
     id domain = MSG0(id, cookie, "domain");
+    if (!name || !domain)
+        return;
+
     id path = MSG0(id, cookie, "path");
-    id key = macoblox_cookie_key(domain, path, name);
+    id val = MSG0(id, cookie, "value");
+    unsigned long val_len = val ? MSG0(unsigned long, val, "length") : 0;
     id expires = MSG0(id, cookie, "expiresDate");
     id now = MSG0(id, objc_getClass("NSDate"), "date");
     int persistent = expires && MSG1(long, expires, "compare:", now) == 1;
-    int is_security = name && (MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY")) ||
-                              MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring("ROBLOSECURITY")));
+    int is_security = (MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY")) ||
+                       MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring("ROBLOSECURITY")));
+
     if (is_security) {
+        // CRITICAL: NEVER allow Roblox to overwrite or delete a valid session cookie
+        // with an empty string or when it cleans up on shutdown!
+        if (deleted || val_len == 0) {
+            write_str("[MacOBlox Cookies] ignoring deletion/empty value for security cookie\n");
+            return;
+        }
         persistent = 1;
-        if (!expires) {
+        // Always enforce a 10-year validity window so NSHTTPCookie never expires it
+        if (!expires || MSG1(long, expires, "compare:", now) != 1) {
             expires = ((id (*)(id, SEL, double))objc_msgSend)(
                 now, sel_registerName("dateByAddingTimeInterval:"), 10.0 * 365.0 * 86400.0);
         }
     }
+
+    while (__sync_lock_test_and_set(&macoblox_cookie_lock, 1))
+        usleep(500);
+
+    if (!macoblox_saved_cookies)
+        macoblox_saved_cookies = MSG0(id, MSG0(id, objc_getClass("NSMutableDictionary"), "alloc"), "init");
+    id key = macoblox_cookie_key(domain, path, name);
+
     write_str("[MacOBlox Cookies] ");
     write_str(deleted ? "delete " : "set ");
-    write_str(name ? MSG0(const char*, name, "UTF8String") : "?");
+    write_str(MSG0(const char*, name, "UTF8String"));
     write_str(" domain=");
-    write_str(domain ? MSG0(const char*, domain, "UTF8String") : "?");
+    write_str(MSG0(const char*, domain, "UTF8String"));
     write_str(deleted ? "\n" : (persistent ? " persistent\n" : " session\n"));
+
     if ((deleted && !is_security) || (!persistent && !is_security)) {
         MSG1(void, macoblox_saved_cookies, "removeObjectForKey:", key);
     } else {
         id entry = MSG0(id, objc_getClass("NSMutableDictionary"), "dictionary");
         MSG2(void, entry, "setObject:forKey:", name, macoblox_nsstring("Name"));
-        MSG2(void, entry, "setObject:forKey:", MSG0(id, cookie, "value"), macoblox_nsstring("Value"));
+        MSG2(void, entry, "setObject:forKey:", val ? val : macoblox_nsstring(""), macoblox_nsstring("Value"));
         MSG2(void, entry, "setObject:forKey:", domain, macoblox_nsstring("Domain"));
         MSG2(void, entry, "setObject:forKey:", path ? path : macoblox_nsstring("/"), macoblox_nsstring("Path"));
-        MSG2(void, entry, "setObject:forKey:", expires, macoblox_nsstring("Expires"));
+        MSG2(void, entry, "setObject:forKey:", expires ? expires : now, macoblox_nsstring("Expires"));
         id properties = MSG0(id, cookie, "properties");
         id secure = properties ? MSG1(id, properties, "objectForKey:", macoblox_nsstring("Secure")) : 0;
         int is_secure = secure && ((MacOBloxBool (*)(id, SEL, SEL))objc_msgSend)(secure, sel_registerName("respondsToSelector:"), sel_registerName("boolValue"))
@@ -4105,7 +4127,8 @@ static void macoblox_remember_cookie(id cookie, int deleted) {
         MSG2(void, entry, "setObject:forKey:", macoblox_cf_boolean(is_secure), macoblox_nsstring("Secure"));
         MSG2(void, macoblox_saved_cookies, "setObject:forKey:", entry, key);
     }
-    macoblox_write_saved_cookies();
+    macoblox_write_saved_cookies_locked();
+    __sync_lock_release(&macoblox_cookie_lock);
 }
 
 static void (*orig_cookie_storage_set)(id, SEL, id) = 0;
@@ -4148,17 +4171,34 @@ static id hooked_cookie_storage_for_url(id self, SEL cmd, id url) {
         MSG1(void, present, "addObject:", MSG0(id, cookie, "name"));
     }
     id now = MSG0(id, objc_getClass("NSDate"), "date");
-    id entries = MSG0(id, macoblox_saved_cookies, "allValues");
-    unsigned long entry_count = MSG0(unsigned long, entries, "count");
+    while (__sync_lock_test_and_set(&macoblox_cookie_lock, 1))
+        usleep(500);
+
+    id entries = macoblox_saved_cookies ? MSG0(id, macoblox_saved_cookies, "allValues") : 0;
+    unsigned long entry_count = entries ? MSG0(unsigned long, entries, "count") : 0;
     for (unsigned long index = 0; index < entry_count; index++) {
         id entry = ((id (*)(id, SEL, unsigned long))objc_msgSend)(entries, sel_registerName("objectAtIndex:"), index);
         id name = MSG1(id, entry, "objectForKey:", macoblox_nsstring("Name"));
         if (MSG1(MacOBloxBool, present, "containsObject:", name))
             continue;
         id expires = MSG1(id, entry, "objectForKey:", macoblox_nsstring("Expires"));
-        int is_security = name && MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY"));
+        int is_security = name && (MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY")) ||
+                                  MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring("ROBLOSECURITY")));
+        id val = MSG1(id, entry, "objectForKey:", macoblox_nsstring("Value"));
+        unsigned long val_len = val ? MSG0(unsigned long, val, "length") : 0;
+        if (is_security && val_len == 0)
+            continue;
         if (!is_security && expires && MSG1(long, expires, "compare:", now) != 1)
             continue;
+
+        if (is_security && (!expires || MSG1(long, expires, "compare:", now) != 1)) {
+            id fresh_expires = ((id (*)(id, SEL, double))objc_msgSend)(
+                now, sel_registerName("dateByAddingTimeInterval:"), 10.0 * 365.0 * 86400.0);
+            id mutable_entry = MSG0(id, entry, "mutableCopy");
+            MSG2(void, mutable_entry, "setObject:forKey:", fresh_expires, macoblox_nsstring("Expires"));
+            entry = MSG0(id, mutable_entry, "autorelease");
+        }
+
         id domain = MSG0(id, MSG1(id, entry, "objectForKey:", macoblox_nsstring("Domain")), "lowercaseString");
         id bare = MSG1(MacOBloxBool, domain, "hasPrefix:", macoblox_nsstring("."))
             ? ((id (*)(id, SEL, unsigned long))objc_msgSend)(domain, sel_registerName("substringFromIndex:"), 1)
@@ -4179,24 +4219,52 @@ static id hooked_cookie_storage_for_url(id self, SEL cmd, id url) {
             MSG1(void, present, "addObject:", name);
         }
     }
+    __sync_lock_release(&macoblox_cookie_lock);
+
     MSG0(void, present, "release");
     return MSG0(id, merged, "autorelease");
 }
 
 static void macoblox_load_cookies(void) {
     id storage = MSG0(id, objc_getClass("NSHTTPCookieStorage"), "sharedHTTPCookieStorage");
-    id entries = MSG1(id, objc_getClass("NSArray"), "arrayWithContentsOfFile:", macoblox_cookie_file());
+    id file1 = macoblox_cookie_file();
+    id home = ((id (*)(void))dlsym(RTLD_DEFAULT, "NSHomeDirectory"))();
+    id file2 = home ? MSG1(id, home, "stringByAppendingPathComponent:", macoblox_nsstring("Library/Crabblox/Cookies.plist")) : 0;
+
+    id entries = MSG1(id, objc_getClass("NSArray"), "arrayWithContentsOfFile:", file1);
+    if (!entries || MSG0(unsigned long, entries, "count") == 0) {
+        if (file2)
+            entries = MSG1(id, objc_getClass("NSArray"), "arrayWithContentsOfFile:", file2);
+    }
     unsigned long count = entries ? MSG0(unsigned long, entries, "count") : 0;
     id now = MSG0(id, objc_getClass("NSDate"), "date");
     int loaded = 0;
     macoblox_loading_cookies = 1;
+
+    while (__sync_lock_test_and_set(&macoblox_cookie_lock, 1))
+        usleep(500);
+
     for (unsigned long index = 0; index < count; index++) {
         id entry = ((id (*)(id, SEL, unsigned long))objc_msgSend)(entries, sel_registerName("objectAtIndex:"), index);
         id expires = MSG1(id, entry, "objectForKey:", macoblox_nsstring("Expires"));
         id name = MSG1(id, entry, "objectForKey:", macoblox_nsstring("Name"));
-        int is_security = name && MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY"));
+        int is_security = name && (MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY")) ||
+                                  MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring("ROBLOSECURITY")));
+        id val = MSG1(id, entry, "objectForKey:", macoblox_nsstring("Value"));
+        unsigned long val_len = val ? MSG0(unsigned long, val, "length") : 0;
+        if (is_security && val_len == 0)
+            continue;
         if (!is_security && expires && MSG1(long, expires, "compare:", now) != 1 /* NSOrderedDescending */)
             continue;
+
+        if (is_security && (!expires || MSG1(long, expires, "compare:", now) != 1)) {
+            id fresh_expires = ((id (*)(id, SEL, double))objc_msgSend)(
+                now, sel_registerName("dateByAddingTimeInterval:"), 10.0 * 365.0 * 86400.0);
+            id mutable_entry = MSG0(id, entry, "mutableCopy");
+            MSG2(void, mutable_entry, "setObject:forKey:", fresh_expires, macoblox_nsstring("Expires"));
+            entry = MSG0(id, mutable_entry, "autorelease");
+        }
+
         id cookie = MSG1(id, objc_getClass("NSHTTPCookie"), "cookieWithProperties:", entry);
         if (cookie) {
             MSG1(void, storage, "setCookie:", cookie);
@@ -4209,6 +4277,8 @@ static void macoblox_load_cookies(void) {
             loaded++;
         }
     }
+    __sync_lock_release(&macoblox_cookie_lock);
+
     macoblox_loading_cookies = 0;
     write_str("[MacOBlox Cookies] loaded ");
     print_num(loaded);

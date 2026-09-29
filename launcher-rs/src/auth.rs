@@ -20,22 +20,47 @@ pub struct UserInfo {
 }
 
 pub fn signed_in(paths: &Paths) -> bool {
-    let plist_path = paths.cookies_plist();
-    if !plist_path.exists() {
-        return false;
+    if signed_in_from_plist(paths) {
+        return true;
     }
-    if let Ok(PlistValue::Array(items)) = PlistValue::from_file(&plist_path) {
-        items.iter().any(|item| {
-            if let PlistValue::Dictionary(dict) = item {
-                dict.get("Name").and_then(|v| v.as_string()) == Some(".ROBLOSECURITY")
-                    && dict.get("Value").and_then(|v| v.as_string()).is_some()
-            } else {
-                false
+    // Fallback: check saved accounts from accounts.json
+    load_accounts(paths).iter().any(|a| !a.cookie.trim().is_empty())
+}
+
+pub fn signed_in_from_plist(paths: &Paths) -> bool {
+    let username_env = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let candidates = [
+        paths.cookies_plist(),
+        paths.darling_prefix.join("Users").join(&username_env).join("Library/MacOBlox/Cookies.plist"),
+        paths.darling_prefix.join("Users").join(&username_env).join("Library/Crabblox/Cookies.plist"),
+    ];
+
+    for plist_path in &candidates {
+        if !plist_path.exists() {
+            continue;
+        }
+        if let Ok(PlistValue::Array(items)) = PlistValue::from_file(plist_path) {
+            let found = items.iter().any(|item| {
+                if let PlistValue::Dictionary(dict) = item {
+                    let name_match = dict.get("Name")
+                        .and_then(|v| v.as_string())
+                        .map(|n| n == ".ROBLOSECURITY" || n == "ROBLOSECURITY")
+                        .unwrap_or(false);
+                    let val_valid = dict.get("Value")
+                        .and_then(|v| v.as_string())
+                        .map(|s| !s.trim().is_empty())
+                        .unwrap_or(false);
+                    name_match && val_valid
+                } else {
+                    false
+                }
+            });
+            if found {
+                return true;
             }
-        })
-    } else {
-        false
+        }
     }
+    false
 }
 
 pub fn signed_in_user(paths: &Paths) -> Option<String> {
@@ -46,11 +71,80 @@ pub fn signed_in_user(paths: &Paths) -> Option<String> {
     if let Ok(content) = fs::read_to_string(&cache_file) {
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(&content) {
             if let Some(name) = val.get("name").and_then(|v| v.as_str()) {
-                return Some(name.to_string());
+                if !name.trim().is_empty() {
+                    return Some(name.to_string());
+                }
             }
         }
     }
-    None
+    load_accounts(paths).first().map(|a| a.display_name.clone())
+}
+
+pub fn write_session_cookie_files(paths: &Paths, cookie_val: &str) {
+    let clean_val = cookie_val.trim().trim_matches('"').trim_matches('\'');
+    if clean_val.is_empty() {
+        return;
+    }
+    let cookie_pure = if let Some((_, rest)) = clean_val.split_once(".ROBLOSECURITY=") {
+        rest.split(';').next().unwrap_or(rest).trim()
+    } else {
+        clean_val
+    };
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let expires = std::time::UNIX_EPOCH + std::time::Duration::from_secs(now_secs + 3650 * 86400);
+
+    let mut dict = plist::Dictionary::new();
+    dict.insert("Domain".into(), PlistValue::String(".roblox.com".into()));
+    dict.insert("Path".into(), PlistValue::String("/".into()));
+    dict.insert("Name".into(), PlistValue::String(".ROBLOSECURITY".into()));
+    dict.insert("Value".into(), PlistValue::String(cookie_pure.into()));
+    dict.insert("Secure".into(), PlistValue::Boolean(true));
+    dict.insert("Expires".into(), PlistValue::Date(expires.into()));
+
+    let array = PlistValue::Array(vec![PlistValue::Dictionary(dict)]);
+
+    let username_env = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+    let macoblox_plist = paths.darling_prefix.join("Users").join(&username_env).join("Library/MacOBlox/Cookies.plist");
+    let crabblox_plist = paths.darling_prefix.join("Users").join(&username_env).join("Library/Crabblox/Cookies.plist");
+    let primary_plist = paths.cookies_plist();
+
+    for path in [&primary_plist, &macoblox_plist, &crabblox_plist] {
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(()) = array.to_file_xml(path) {
+            if let Ok(metadata) = fs::metadata(path) {
+                let mut perms = metadata.permissions();
+                perms.set_mode(0o600);
+                let _ = fs::set_permissions(path, perms);
+            }
+        }
+    }
+}
+
+pub fn ensure_session_restored(paths: &Paths) -> bool {
+    if signed_in_from_plist(paths) {
+        return true;
+    }
+    let accounts = load_accounts(paths);
+    if let Some(acc) = accounts.first() {
+        if !acc.cookie.trim().is_empty() {
+            write_session_cookie_files(paths, &acc.cookie);
+            let _ = fs::create_dir_all(&paths.cache_dir);
+            if let Ok(content) = serde_json::to_string_pretty(&serde_json::json!({
+                "name": acc.display_name,
+                "id": acc.id
+            })) {
+                let _ = fs::write(paths.user_cache_file(), content);
+            }
+            return true;
+        }
+    }
+    false
 }
 
 pub fn validate_cookie(cookie: &str) -> anyhow::Result<UserInfo> {
@@ -84,40 +178,7 @@ pub fn save_session_cookie(paths: &Paths, cookie: &str) -> anyhow::Result<String
         }))?,
     );
 
-    let plist_path = paths.cookies_plist();
-    if let Some(parent) = plist_path.parent() {
-        let _ = fs::create_dir_all(parent);
-    }
-
-    let expires = std::time::SystemTime::now() + std::time::Duration::from_secs(3650 * 86400);
-
-    let mut dict = plist::Dictionary::new();
-    dict.insert("Domain".into(), PlistValue::String(".roblox.com".into()));
-    dict.insert("Path".into(), PlistValue::String("/".into()));
-    dict.insert("Name".into(), PlistValue::String(".ROBLOSECURITY".into()));
-    dict.insert("Value".into(), PlistValue::String(cookie_val.into()));
-    dict.insert("Secure".into(), PlistValue::Boolean(true));
-    dict.insert("Expires".into(), PlistValue::Date(expires.into()));
-
-    let array = PlistValue::Array(vec![PlistValue::Dictionary(dict)]);
-
-    let username_env = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-    let macoblox_plist = paths.darling_prefix.join("Users").join(&username_env).join("Library/MacOBlox/Cookies.plist");
-    let crabblox_plist = paths.darling_prefix.join("Users").join(&username_env).join("Library/Crabblox/Cookies.plist");
-    let primary_plist = paths.cookies_plist();
-
-    for path in [&primary_plist, &macoblox_plist, &crabblox_plist] {
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(()) = array.to_file_xml(path) {
-            if let Ok(metadata) = fs::metadata(path) {
-                let mut perms = metadata.permissions();
-                perms.set_mode(0o600);
-                let _ = fs::set_permissions(path, perms);
-            }
-        }
-    }
+    write_session_cookie_files(paths, cookie_val);
 
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -143,6 +204,7 @@ pub fn sign_out(paths: &Paths) {
     let _ = fs::remove_file(crabblox_plist);
     let _ = fs::remove_file(paths.cookies_plist());
     let _ = fs::remove_file(paths.user_cache_file());
+    let _ = save_accounts(paths, &[]);
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -599,4 +661,82 @@ fn extract_gecko_cookies(db_path: &Path) -> Vec<String> {
     }
 
     results
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn test_empty_cookie_rejection() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            project_dir: temp_dir.path().to_path_buf(),
+            data_dir: temp_dir.path().to_path_buf(),
+            config_dir: temp_dir.path().join("config"),
+            cache_dir: temp_dir.path().join("cache"),
+            darling_prefix: temp_dir.path().join("darling"),
+            darling_sysroot: PathBuf::from("/usr/libexec/darling"),
+        };
+
+        // When no plist and no accounts exist
+        assert!(!signed_in(&paths));
+
+        // When plist contains empty value
+        let plist_path = paths.cookies_plist();
+        fs::create_dir_all(plist_path.parent().unwrap()).unwrap();
+        let mut dict = plist::Dictionary::new();
+        dict.insert("Domain".into(), PlistValue::String(".roblox.com".into()));
+        dict.insert("Path".into(), PlistValue::String("/".into()));
+        dict.insert("Name".into(), PlistValue::String(".ROBLOSECURITY".into()));
+        dict.insert("Value".into(), PlistValue::String("   ".into()));
+        dict.insert("Secure".into(), PlistValue::Boolean(true));
+        let array = PlistValue::Array(vec![PlistValue::Dictionary(dict)]);
+        array.to_file_xml(&plist_path).unwrap();
+
+        assert!(!signed_in(&paths));
+        assert!(!signed_in_from_plist(&paths));
+
+        // When valid account exists in accounts.json, ensure_session_restored restores it
+        let acc = SavedAccount {
+            id: 12345,
+            username: "TestPlayer".into(),
+            display_name: "TestPlayer".into(),
+            cookie: "_|VALID_SECURITY_COOKIE|_".into(),
+            last_used: 1000,
+        };
+        add_or_update_account(&paths, acc).unwrap();
+
+        assert!(signed_in(&paths));
+        assert!(ensure_session_restored(&paths));
+        assert!(signed_in_from_plist(&paths));
+    }
+
+    #[test]
+    fn test_write_session_cookie_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let paths = Paths {
+            project_dir: temp_dir.path().to_path_buf(),
+            data_dir: temp_dir.path().to_path_buf(),
+            config_dir: temp_dir.path().join("config"),
+            cache_dir: temp_dir.path().join("cache"),
+            darling_prefix: temp_dir.path().join("darling"),
+            darling_sysroot: PathBuf::from("/usr/libexec/darling"),
+        };
+
+        write_session_cookie_files(&paths, ".ROBLOSECURITY=_|MYCOOKIE|_");
+        assert!(paths.cookies_plist().exists());
+
+        if let Ok(PlistValue::Array(items)) = PlistValue::from_file(paths.cookies_plist()) {
+            if let Some(PlistValue::Dictionary(dict)) = items.first() {
+                assert_eq!(dict.get("Name").and_then(|v| v.as_string()), Some(".ROBLOSECURITY"));
+                assert_eq!(dict.get("Value").and_then(|v| v.as_string()), Some("_|MYCOOKIE|_"));
+            } else {
+                panic!("Expected dictionary in plist array");
+            }
+        } else {
+            panic!("Expected valid plist file");
+        }
+    }
 }

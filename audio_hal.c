@@ -424,11 +424,15 @@ static void unit_render(OutputUnit *unit, unsigned char *out, UInt32 frames) {
             list.buffers[c].data = (unsigned char *)unit->scratch + (unsigned long)c * frames * sample_bytes;
         }
         status = unit->render(unit->render_context, &flags, &stamp, 0, frames, (BufferList *)&list);
-        for (UInt32 f = 0; f < frames; f++)
+        for (UInt32 f = 0; f < frames; f++) {
             for (UInt32 c = 0; c < list.count; c++)
                 for (UInt32 b = 0; b < sample_bytes; b++)
                     out[(f * channels + c) * sample_bytes + b] =
                         ((unsigned char *)list.buffers[c].data)[f * sample_bytes + b];
+            for (UInt32 c = list.count; c < channels; c++)
+                for (UInt32 b = 0; b < sample_bytes; b++)
+                    out[(f * channels + c) * sample_bytes + b] = 0;
+        }
     }
     if (status != NO_ERROR)
         for (UInt32 i = 0; i < frames * frame_bytes; i++) out[i] = 0;
