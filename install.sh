@@ -93,17 +93,24 @@ main() {
   command -v darling >/dev/null ||
     die "Darling is not installed. Build it with https://docs.darlinghq.org/build-instructions.html and run this again."
 
-  if [[ -d $DIR/.git ]]; then
-    say "Updating Crabblox"
-    # Discard any local modifications to prebuilt binaries or compiled crabblox
-    git -C "$DIR" checkout -- crabblox prebuilt/ 2>/dev/null || true
-    if ! git -C "$DIR" pull --ff-only; then
-      say "Fast-forward failed, resetting local binary state to remote..."
-      git -C "$DIR" fetch origin main
-      git -C "$DIR" reset --hard origin/main
-    fi
+  if [[ -d "$DIR/.git" ]]; then
+    say "Updating Crabblox (clean update)"
+    # Clear any stale lock file left from interrupted git operations
+    rm -f "$DIR/.git/index.lock" 2>/dev/null || true
+    # Ensure remote origin is configured
+    git -C "$DIR" remote set-url origin "$REPO" 2>/dev/null || true
+    # Discard any local modifications to tracked files
+    git -C "$DIR" reset --hard HEAD 2>/dev/null || true
+    # Fetch latest commits from remote main branch
+    git -C "$DIR" fetch --prune origin main
+    # Unconditionally align local branch with origin/main
+    git -C "$DIR" checkout -B main origin/main
+    git -C "$DIR" reset --hard origin/main
+    # Clean untracked residue, preserving user data like RobloxPlayer.app, downloads, and backups
+    git -C "$DIR" clean -fd -e "RobloxPlayer.app" -e "downloads" -e "backups" 2>/dev/null || true
   else
     say "Downloading Crabblox"
+    mkdir -p "$(dirname "$DIR")"
     git clone --depth 1 "$REPO" "$DIR"
   fi
 
