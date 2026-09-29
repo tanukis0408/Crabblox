@@ -1,6 +1,7 @@
 mod auth;
 pub mod discord_rpc;
 mod dns;
+pub mod doctor;
 mod fast_flags;
 mod gui;
 mod paths;
@@ -44,6 +45,8 @@ enum Commands {
     Update,
     /// Show current installation status, account, and paths
     Status,
+    /// Run System Doctor health checks (Darling, Vulkan, Audio, Limits, Disk, Network)
+    Doctor,
     /// Manage Fast Flags (ClientAppSettings.json)
     Flags {
         /// Set maximum target FPS (e.g. 144, 240, 0 for default)
@@ -143,6 +146,14 @@ fn main() -> anyhow::Result<()> {
             }
         }
 
+        Commands::Doctor => {
+            let report = doctor::DoctorReport::run(&paths);
+            report.print_cli();
+            if report.has_failures() {
+                std::process::exit(1);
+            }
+        }
+
         Commands::Flags { fps, set, list } => {
             if let Some(fps_val) = fps {
                 fast_flags::FastFlags::set_fps_cap(&paths, fps_val)?;
@@ -203,7 +214,7 @@ async fn run_roblox(paths: Arc<Paths>) -> anyhow::Result<()> {
     session.dns.stop();
     println!("Roblox exited with status: {}", status);
     if !status.success() {
-        runner::scan_crash_diagnostics(&session.log_path);
+        runner::scan_crash_diagnostics_with_status(&session.log_path, Some(&status));
     }
     Ok(())
 }

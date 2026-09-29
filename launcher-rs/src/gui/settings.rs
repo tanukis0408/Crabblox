@@ -415,6 +415,77 @@ pub fn build_settings_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -
     });
     diag_group.add(&restart_darling_row);
 
+    // System Doctor row
+    let doctor_row = adw::ActionRow::builder()
+        .title("Системный доктор (Health Check)")
+        .subtitle("Комплексная диагностика Darling, Vulkan, звука, лимитов системы и сети")
+        .build();
+
+    let doctor_btn = gtk4::Button::with_label("Проверить");
+    doctor_btn.add_css_class("suggested-action");
+    doctor_btn.set_valign(gtk4::Align::Center);
+
+    let paths_doc = paths.clone();
+    let win_doc = window.downgrade();
+    let doc_btn_weak = doctor_btn.downgrade();
+
+    doctor_btn.connect_clicked(move |_| {
+        let p = paths_doc.clone();
+        let w_opt = win_doc.upgrade();
+        let b_opt = doc_btn_weak.upgrade();
+
+        if let Some(ref b) = b_opt {
+            b.set_sensitive(false);
+            b.set_label("Проверка…");
+        }
+
+        let (tx, rx) = async_channel::bounded::<crate::doctor::DoctorReport>(1);
+
+        std::thread::spawn(move || {
+            let report = crate::doctor::DoctorReport::run(&p);
+            let _ = tx.send_blocking(report);
+        });
+
+        glib::spawn_future_local(async move {
+            if let Ok(report) = rx.recv().await {
+                if let Some(b) = b_opt {
+                    b.set_sensitive(true);
+                    b.set_label("Проверить");
+                }
+                if let Some(w) = w_opt {
+                    let (_, w_cnt, f_cnt) = report.summary_counts();
+                    let heading = if f_cnt > 0 {
+                        "Системный доктор: обнаружены проблемы"
+                    } else if w_cnt > 0 {
+                        "Системный доктор: предупреждения"
+                    } else {
+                        "Системный доктор: всё готово к запуску"
+                    };
+
+                    let details = report.to_dialog_text();
+                    let dialog = adw::AlertDialog::new(Some(heading), Some(&details));
+                    dialog.add_response("copy", "Копировать отчёт");
+                    dialog.add_response("ok", "Закрыть");
+                    dialog.set_default_response(Some("ok"));
+
+                    let text_to_copy = details.clone();
+                    dialog.connect_response(None, move |_, resp| {
+                        if resp == "copy" {
+                            if let Some(display) = gtk4::gdk::Display::default() {
+                                display.clipboard().set_text(&text_to_copy);
+                            }
+                        }
+                    });
+
+                    dialog.present(Some(&w));
+                }
+            }
+        });
+    });
+
+    doctor_row.add_suffix(&doctor_btn);
+    diag_group.add(&doctor_row);
+
     page.add(&diag_group);
 
     page

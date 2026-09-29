@@ -1047,3 +1047,115 @@ class RobloxSession:
         if self.audio:
             self.audio.stop()
             self.audio = None
+
+
+def run_doctor():
+    """Runs system diagnostics on Darling, Vulkan, Audio, Limits, Disk, and Network."""
+    import urllib.error
+    lines = [
+        "=======================================================",
+        f"        MacOBlox / Crabblox System Doctor {__version__}  ",
+        "=======================================================",
+        "Checking system components and environment readiness...\n",
+    ]
+    passed = 0
+    warnings = 0
+    failed = 0
+
+    # 1. Darling
+    darling_bin = shutil.which("darling")
+    if darling_bin:
+        try:
+            ver = subprocess.run([darling_bin, "--version"], capture_output=True, text=True, timeout=5)
+            ver_text = (ver.stdout or ver.stderr).strip().splitlines()[0]
+        except Exception:
+            ver_text = "installed"
+        lines.append(f"[✓ PASS] Darling Container & Binary\n         • Binary: {darling_bin}\n         • Version: {ver_text}")
+        passed += 1
+    else:
+        lines.append("[✗ FAIL] Darling Container & Binary\n         • 'darling' binary not found in PATH")
+        lines.append("         >>> Advice: Install Darling from package manager or darlinghq.org")
+        failed += 1
+
+    # 2. Vulkan
+    icd_dirs = [Path("/usr/share/vulkan/icd.d"), Path("/etc/vulkan/icd.d"), Path.home() / ".local/share/vulkan/icd.d"]
+    icds = []
+    for d in icd_dirs:
+        if d.is_dir():
+            icds.extend(p.name for p in d.glob("*.json"))
+    has_loader = any(Path(p).exists() for p in ["/usr/lib/x86_64-linux-gnu/libvulkan.so.1", "/usr/lib64/libvulkan.so.1", "/usr/lib/libvulkan.so.1"])
+    if icds:
+        lines.append(f"[✓ PASS] Vulkan & 3D Acceleration\n         • Found ICD manifests: {', '.join(icds)}\n         • Vulkan loader: {'Found' if has_loader else 'Standard loader'}")
+        passed += 1
+    else:
+        lines.append("[✗ FAIL] Vulkan & 3D Acceleration\n         • No Vulkan ICD driver files found in /usr/share/vulkan/icd.d")
+        lines.append("         >>> Advice: Install Vulkan drivers for your GPU (mesa-vulkan-drivers / nvidia-driver)")
+        failed += 1
+
+    # 3. Sound
+    pw_bin = shutil.which("pw-cat") or shutil.which("pw-play") or shutil.which("pacat") or shutil.which("paplay")
+    dev_snd = Path("/dev/snd")
+    if pw_bin:
+        lines.append(f"[✓ PASS] Audio Subsystem\n         • Audio playback binary: {pw_bin}\n         • /dev/snd: {'Accessible' if dev_snd.exists() else 'Missing'}")
+        passed += 1
+    else:
+        lines.append("[! WARN] Audio Subsystem\n         • Neither pw-cat nor pacat found in PATH; audio will be disabled")
+        lines.append("         >>> Advice: Install pipewire-bin / pipewire-utils / pulseaudio-utils")
+        warnings += 1
+
+    # 4. Limits
+    try:
+        import resource
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        if hard >= 65536:
+            lines.append(f"[✓ PASS] System Limits\n         • RLIMIT_NOFILE: soft {soft}, hard {hard} (optimal)")
+            passed += 1
+        elif hard >= 4096:
+            lines.append(f"[! WARN] System Limits\n         • RLIMIT_NOFILE: soft {soft}, hard {hard} (recommended >= 65536)")
+            warnings += 1
+        else:
+            lines.append(f"[✗ FAIL] System Limits\n         • RLIMIT_NOFILE hard limit {hard} is too low (< 4096)")
+            lines.append("         >>> Advice: Add '* soft nofile 65536' and '* hard nofile 65536' to /etc/security/limits.conf")
+            failed += 1
+    except Exception as e:
+        lines.append(f"[! WARN] System Limits\n         • Could not query limits: {e}")
+        warnings += 1
+
+    # 5. Disk
+    try:
+        free_bytes = shutil.disk_usage(DATA_DIR).free
+        free_gb = free_bytes / 1e9
+        if free_gb >= 1.0:
+            lines.append(f"[✓ PASS] Disk Space\n         • {DATA_DIR}: {free_gb:.2f} GB free")
+            passed += 1
+        else:
+            lines.append(f"[! WARN] Disk Space\n         • {DATA_DIR}: {free_gb:.2f} GB free (low disk space)")
+            warnings += 1
+    except Exception as e:
+        lines.append(f"[! WARN] Disk Space\n         • {e}")
+        warnings += 1
+
+    # 6. Network
+    net_ok = False
+    try:
+        req = urllib.request.Request("https://roblox.com", headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            if resp.status in (200, 301, 302, 403):
+                net_ok = True
+    except urllib.error.HTTPError:
+        net_ok = True
+    except Exception:
+        net_ok = False
+
+    if net_ok:
+        lines.append("[✓ PASS] Network & Roblox Endpoints\n         • https://roblox.com: reachable")
+        passed += 1
+    else:
+        lines.append("[! WARN] Network & Roblox Endpoints\n         • https://roblox.com: unreachable or timed out")
+        lines.append("         >>> Advice: Check your internet connection or configure encrypted DNS / VPN")
+        warnings += 1
+
+    lines.append("-------------------------------------------------------")
+    lines.append(f"Doctor Summary: {passed} passed, {warnings} warning(s), {failed} failed.")
+    lines.append("=======================================================\n")
+    return "\n".join(lines)

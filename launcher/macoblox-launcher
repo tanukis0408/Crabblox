@@ -13,6 +13,11 @@ if sys.argv[1:2] == ["--studio"]:
         studio.launch(sys.argv[2:])
         sys.exit(0)
 
+if sys.argv[1:2] == ["--doctor"]:
+    from macoblox import core  # noqa: E402
+    print(core.run_doctor())
+    sys.exit(0)
+
 from macoblox.app import main  # noqa: E402
 
 sys.exit(main())

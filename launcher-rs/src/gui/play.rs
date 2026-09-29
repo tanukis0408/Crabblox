@@ -172,6 +172,26 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
 
     status_box.append(&vram_badge);
     status_box.append(&darling_badge);
+
+    let doctor_badge = gtk4::Box::new(gtk4::Orientation::Horizontal, 6);
+    doctor_badge.add_css_class("card");
+    doctor_badge.set_margin_start(4);
+    doctor_badge.set_margin_end(4);
+
+    let doctor_icon = gtk4::Image::from_icon_name("emblem-ok-symbolic");
+    doctor_icon.set_margin_start(8);
+    doctor_icon.set_margin_top(4);
+    doctor_icon.set_margin_bottom(4);
+    let doctor_label = gtk4::Label::new(Some("Система: OK"));
+    doctor_label.add_css_class("caption");
+    doctor_label.set_margin_end(8);
+    doctor_label.set_margin_top(4);
+    doctor_label.set_margin_bottom(4);
+    doctor_badge.append(&doctor_icon);
+    doctor_badge.append(&doctor_label);
+    doctor_badge.set_tooltip_text(Some("Состояние проверки компонентов (Darling, Vulkan, звук, сеть)"));
+    status_box.append(&doctor_badge);
+
     controls_box.append(&status_box);
 
     // Play or Install Button
@@ -448,7 +468,7 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                     loop {
                         if let Ok(Some(status)) = session.child.try_wait() {
                             if !seen_roblox && !status.success() {
-                                runner::scan_crash_diagnostics(&session.log_path);
+                                let diags = runner::scan_crash_diagnostics_with_status(&session.log_path, Some(&status));
                                 let log_tail = if let Ok(content) = std::fs::read_to_string(&session.log_path) {
                                     let lines: Vec<&str> = content.lines().collect();
                                     let start = lines.len().saturating_sub(8);
@@ -456,11 +476,22 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                                 } else {
                                     String::new()
                                 };
-                                let msg = if log_tail.is_empty() {
-                                    format!("Roblox завершился с кодом {status}")
-                                } else {
-                                    format!("Roblox завершился с кодом {status}:\n\n{log_tail}")
-                                };
+                                let mut msg = format!("Roblox завершился с кодом {status}\n");
+                                if !diags.is_empty() {
+                                    msg.push_str("\nОбнаруженная причина сбоя:\n");
+                                    for d in &diags {
+                                        msg.push_str(&format!("• {}\n  {}\n", d.title, d.description));
+                                        if !d.advice.is_empty() {
+                                            msg.push_str("  Рекомендации по устранению:\n");
+                                            for a in &d.advice {
+                                                msg.push_str(&format!("  - {}\n", a));
+                                            }
+                                        }
+                                    }
+                                }
+                                if !log_tail.is_empty() {
+                                    msg.push_str(&format!("\nХвост лога:\n{log_tail}"));
+                                }
                                 let _ = tx_clone.send_blocking(PlayState::Failed(msg));
                             } else {
                                 let _ = tx_clone.send_blocking(PlayState::Stopped);

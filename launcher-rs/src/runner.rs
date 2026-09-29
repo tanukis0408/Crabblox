@@ -158,16 +158,19 @@ impl RobloxSession {
     pub fn wait(&mut self) -> std::io::Result<std::process::ExitStatus> {
         let status = self.child.wait()?;
         if !status.success() && !self.diagnostics_performed {
-            scan_crash_diagnostics(&self.log_path);
+            scan_crash_diagnostics_with_status(&self.log_path, Some(&status));
             self.diagnostics_performed = true;
         }
         Ok(status)
     }
 
-    pub fn scan_diagnostics(&mut self) {
+    pub fn scan_diagnostics(&mut self) -> Vec<CrashDiagnosis> {
         if !self.diagnostics_performed {
-            scan_crash_diagnostics(&self.log_path);
+            let res = scan_crash_diagnostics_with_status(&self.log_path, None);
             self.diagnostics_performed = true;
+            res
+        } else {
+            Vec::new()
         }
     }
 }
@@ -180,7 +183,7 @@ impl Drop for RobloxSession {
         if !self.diagnostics_performed {
             if let Ok(Some(status)) = self.child.try_wait() {
                 if !status.success() {
-                    scan_crash_diagnostics(&self.log_path);
+                    scan_crash_diagnostics_with_status(&self.log_path, Some(&status));
                     self.diagnostics_performed = true;
                 }
             }
@@ -818,12 +821,63 @@ pub fn find_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CrashCategory {
+    OutOfMemory,
+    SegmentationFault,
+    DyldLinkFailure,
+    PermissionOrSandbox,
+    DarlingServerFailure,
+    DisplayOrVulkan,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CrashDiagnosis {
+    pub category: CrashCategory,
+    pub title: String,
+    pub description: String,
+    pub advice: Vec<String>,
+}
+
 #[allow(dead_code)]
-pub fn scan_crash_diagnostics(log_path: &Path) {
+pub fn scan_crash_diagnostics(log_path: &Path) -> Vec<CrashDiagnosis> {
+    scan_crash_diagnostics_with_status(log_path, None)
+}
+
+pub fn scan_crash_diagnostics_with_status(
+    log_path: &Path,
+    status: Option<&std::process::ExitStatus>,
+) -> Vec<CrashDiagnosis> {
+    let exit_code = status.and_then(|s| s.code());
+    let signal = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            status.and_then(|s| s.signal())
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    };
+    scan_crash_diagnostics_with_exit(log_path, exit_code, signal)
+}
+
+pub fn scan_crash_diagnostics_with_exit(
+    log_path: &Path,
+    exit_code: Option<i32>,
+    signal: Option<i32>,
+) -> Vec<CrashDiagnosis> {
     eprintln!("\n=======================================================");
     eprintln!("        Crabblox Crash Diagnostics & Troubleshooting   ");
     eprintln!("=======================================================");
-    eprintln!("Roblox process exited with a failure code.");
+    if let Some(code) = exit_code {
+        eprintln!("Process exited with status code: {}", code);
+    }
+    if let Some(sig) = signal {
+        eprintln!("Process terminated by signal: {}", sig);
+    }
     eprintln!("Scanning log file for crash signatures: {:?}", log_path);
 
     let content = match read_log_tail(log_path, 2 * 1024 * 1024) {
@@ -831,48 +885,124 @@ pub fn scan_crash_diagnostics(log_path: &Path) {
         Err(e) => {
             eprintln!("Could not read log file: {e}");
             eprintln!("=======================================================\n");
-            return;
+            return Vec::new();
         }
     };
 
     let content_lower = content.to_lowercase();
-    let mut found_diagnostics = Vec::new();
+    let mut diagnoses = Vec::new();
 
-    if content_lower.contains("segmentation fault")
-        || content_lower.contains("sigsegv")
-        || content_lower.contains("exc_bad_access")
-        || content_lower.contains("segfault at")
-        || content_lower.contains("code=segv")
-    {
-        found_diagnostics.push(
-            "• Memory access violation (Segmentation Fault / SIGSEGV / EXC_BAD_ACCESS):\n  \
-             Roblox or Darling crashed while accessing invalid memory.\n  \
-             Diagnostic advice:\n    \
-             - Clear the Mesa shader cache: rm -rf ~/.cache/mesa_shader_cache\n    \
-             - Restart the Darling container: crabblox run --restart-darling\n    \
-             - Update your host GPU graphics drivers (Mesa / NVIDIA).\n    \
-             - If running under Wayland, test under X11 or with Gamescope (CRABBLOX_GAMESCOPE=1)."
-        );
+    // 1. Out-of-Memory (OOM)
+    let is_oom = signal == Some(9)
+        || exit_code == Some(137)
+        || content_lower.contains("out of memory")
+        || content_lower.contains("cannot allocate memory")
+        || content_lower.contains("oom-killer")
+        || content_lower.contains("killed process")
+        || content_lower.contains("std::bad_alloc")
+        || content_lower.contains("allocation failed")
+        || content_lower.contains("virtualalloc failed")
+        || content_lower.contains("mmap failed: cannot allocate memory")
+        || content_lower.contains("darling: memory exhausted")
+        || content_lower.contains("kerroutofmemory");
+
+    if is_oom {
+        diagnoses.push(CrashDiagnosis {
+            category: CrashCategory::OutOfMemory,
+            title: "Out-of-Memory (OOM) Termination".to_string(),
+            description: "Roblox or Darling ran out of RAM or swap space and was terminated by Linux (OOM-killer) or memory allocator.".to_string(),
+            advice: vec![
+                "Close memory-heavy applications (web browsers, Discord, IDEs) before playing.".to_string(),
+                "Increase Linux swap space (e.g. enable zram: 'sudo zramctl' or add a swap file: 'sudo fallocate -l 4G /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile').".to_string(),
+                "Lower graphics quality in Fast Flags (ClientAppSettings.json: DFIntDebugFRMQualityLevelOverride = 1).".to_string(),
+            ],
+        });
     }
 
-    if content_lower.contains("dyld: symbol not found")
+    // 2. Dynamic linker failure (dyld)
+    let is_dyld = content_lower.contains("dyld: symbol not found")
         || content_lower.contains("symbol not found:")
         || content_lower.contains("symbol lookup error")
         || content_lower.contains("lazy symbol binding failed")
         || content_lower.contains("dyld: library not loaded")
         || content_lower.contains("reason: image not found")
-    {
-        found_diagnostics.push(
-            "• Dynamic linker failure (dyld symbol / library lookup error):\n  \
-             A required macOS Darwin dynamic symbol or stub framework was not found.\n  \
-             Diagnostic advice:\n    \
-             - Rebuild the MacOBlox shims: ./build_debug_shim.sh\n    \
-             - Verify stub frameworks (CoreML, CoreHaptics, DeviceCheck) are installed in the Darling prefix System/Library/Frameworks.\n    \
-             - Ensure DYLD_INSERT_LIBRARIES points to libMacOBloxShims.dylib."
-        );
+        || content_lower.contains("incompatible library version")
+        || content_lower.contains("mach-o file, but wrong architecture")
+        || content_lower.contains("file not found: libmacobloxshims.dylib");
+
+    if is_dyld {
+        diagnoses.push(CrashDiagnosis {
+            category: CrashCategory::DyldLinkFailure,
+            title: "Dynamic Linker Failure (dyld symbol / library lookup error)".to_string(),
+            description: "A required macOS Darwin dynamic symbol or stub framework was not found at runtime.".to_string(),
+            advice: vec![
+                "Rebuild the MacOBlox shims: run './build_debug_shim.sh' in the project directory.".to_string(),
+                "Verify stub frameworks (CoreML, CoreHaptics, DeviceCheck) are present in Darling prefix System/Library/Frameworks.".to_string(),
+                "Ensure DYLD_INSERT_LIBRARIES points to a valid libMacOBloxShims.dylib.".to_string(),
+            ],
+        });
     }
 
-    if content_lower.contains("cannot connect to darlingserver")
+    // 3. Segmentation fault / Memory access violation
+    let is_segfault = signal == Some(11)
+        || exit_code == Some(139)
+        || signal == Some(10)
+        || exit_code == Some(138)
+        || (!is_oom && (signal == Some(6) || exit_code == Some(134)))
+        || content_lower.contains("segmentation fault")
+        || content_lower.contains("sigsegv")
+        || content_lower.contains("exc_bad_access")
+        || content_lower.contains("segfault at")
+        || content_lower.contains("code=segv")
+        || content_lower.contains("bus error")
+        || content_lower.contains("sigbus")
+        || content_lower.contains("abort trap: 6")
+        || content_lower.contains("assertion failed");
+
+    if is_segfault {
+        diagnoses.push(CrashDiagnosis {
+            category: CrashCategory::SegmentationFault,
+            title: "Memory Access Violation (Segmentation Fault / SIGSEGV)".to_string(),
+            description: "Roblox or Darling crashed while accessing an invalid memory address or encountered a critical assertion failure.".to_string(),
+            advice: vec![
+                "Clear the Mesa shader cache: rm -rf ~/.cache/mesa_shader_cache".to_string(),
+                "Clear Crabblox Vulkan pipeline cache: rm -rf ~/.cache/crabblox/vulkan_cache".to_string(),
+                "Restart the Darling container daemon: crabblox run --restart-darling".to_string(),
+                "Update your host GPU graphics drivers (Mesa / NVIDIA).".to_string(),
+                "If running under Wayland, test under X11 or with Gamescope (CRABBLOX_GAMESCOPE=1).".to_string(),
+            ],
+        });
+    }
+
+    // 4. Permission / Sandboxing issues
+    let is_perm = exit_code == Some(126)
+        || content_lower.contains("permission denied")
+        || content_lower.contains("operation not permitted")
+        || content_lower.contains("eacces")
+        || content_lower.contains("eperm")
+        || content_lower.contains("access denied")
+        || content_lower.contains("failed to create socket: permission denied")
+        || content_lower.contains("cannot bind to port: permission denied")
+        || content_lower.contains("requires root or darling-mach kernel module")
+        || content_lower.contains("noroot library failed")
+        || content_lower.contains("failed to open /dev/");
+
+    if is_perm {
+        diagnoses.push(CrashDiagnosis {
+            category: CrashCategory::PermissionOrSandbox,
+            title: "Permission Denied / Sandboxing Failure".to_string(),
+            description: "The process could not access required files, devices, or sockets due to permission restrictions.".to_string(),
+            advice: vec![
+                "Fix Darling prefix permissions: chmod -R u+rwX ~/.darling".to_string(),
+                "Add your user to required hardware groups: sudo usermod -aG audio,video,render $USER".to_string(),
+                "Enable unprivileged user namespaces: sudo sysctl -w kernel.unprivileged_userns_clone=1".to_string(),
+                "If running inside a container or Flatpak, check sandbox device and filesystem permissions.".to_string(),
+            ],
+        });
+    }
+
+    // 5. Darlingserver communication failure
+    let is_ds = content_lower.contains("cannot connect to darlingserver")
         || content_lower.contains("failed to connect to darlingserver")
         || content_lower.contains("darlingserver communication failure")
         || content_lower.contains("communication error with darlingserver")
@@ -882,52 +1012,69 @@ pub fn scan_crash_diagnostics(log_path: &Path) {
                 || content_lower.contains("broken pipe")
                 || content_lower.contains("dead")
                 || content_lower.contains("died")
-                || content_lower.contains("socket error")))
-    {
-        found_diagnostics.push(
-            "• Darlingserver communication failure:\n  \
-             The Darling container daemon is unresponsive, terminated, or socket communication was lost.\n  \
-             Diagnostic advice:\n    \
-             - Restart Darling and clear stale state: crabblox run --restart-darling\n    \
-             - Kill any lingering darlingserver processes: killall -9 darlingserver\n    \
-             - Remove any stale socket/pid files in the Darling prefix (e.g. ~/.local/share/darling/.darlingserver.sock)."
-        );
+                || content_lower.contains("socket error")));
+
+    if is_ds {
+        diagnoses.push(CrashDiagnosis {
+            category: CrashCategory::DarlingServerFailure,
+            title: "Darlingserver Container Daemon Failure".to_string(),
+            description: "The Darling container daemon is unresponsive, terminated, or socket communication was lost.".to_string(),
+            advice: vec![
+                "Restart Darling and clear stale state: crabblox run --restart-darling".to_string(),
+                "Kill any lingering darlingserver processes: killall -9 darlingserver".to_string(),
+                "Remove any stale socket/pid files in the Darling prefix (e.g. ~/.darling/.darlingserver.sock).".to_string(),
+            ],
+        });
     }
 
-    if content_lower.contains("cannot open display")
+    // 6. Display / Vulkan failure
+    let is_display = content_lower.contains("cannot open display")
         || content_lower.contains("failed to open display")
         || content_lower.contains("x11 connection rejected")
         || content_lower.contains("no protocol specified")
-    {
-        found_diagnostics.push(
-            "• Display connection failure:\n  \
-             Failed to connect to the X11/Wayland display server.\n  \
-             Diagnostic advice:\n    \
-             - Ensure DISPLAY (or WAYLAND_DISPLAY) is properly set.\n    \
-             - Authorize local X11 access: xhost +local:\n    \
-             - If using Gamescope, ensure your user has access to GPU DRM/render devices."
-        );
-    }
-
-    if content_lower.contains("vk_error_")
+        || content_lower.contains("vk_error_")
         || content_lower.contains("vkcreateinstance")
         || content_lower.contains("unable to find a compatible vulkan")
         || content_lower.contains("libgl error")
-    {
-        found_diagnostics.push(
-            "• Graphics / Vulkan pipeline failure:\n  \
-             Initialization of the 3D graphics backend failed.\n  \
-             Diagnostic advice:\n    \
-             - Check Vulkan installation with 'vulkaninfo --summary'.\n    \
-             - Ensure both 32-bit and 64-bit Vulkan drivers are present.\n    \
-             - Verify EGL/Vulkan device permissions."
-        );
+        || content_lower.contains("egl_bad_alloc");
+
+    if is_display {
+        diagnoses.push(CrashDiagnosis {
+            category: CrashCategory::DisplayOrVulkan,
+            title: "Display Server or Vulkan Graphics Failure".to_string(),
+            description: "Failed to connect to the X11/Wayland display server or initialize the 3D graphics pipeline.".to_string(),
+            advice: vec![
+                "Ensure DISPLAY (or WAYLAND_DISPLAY) is properly set.".to_string(),
+                "Authorize local X11 access: xhost +local:".to_string(),
+                "Run 'crabblox doctor' to check Vulkan drivers and 3D acceleration.".to_string(),
+                "Ensure both 32-bit and 64-bit Vulkan drivers are installed.".to_string(),
+            ],
+        });
     }
 
-    if !found_diagnostics.is_empty() {
+    if diagnoses.is_empty() && (exit_code.map(|c| c != 0).unwrap_or(false) || signal.is_some()) {
+        diagnoses.push(CrashDiagnosis {
+            category: CrashCategory::Unknown,
+            title: "Unclassified Process Failure".to_string(),
+            description: format!(
+                "Roblox exited abnormally (exit code: {:?}, signal: {:?}) without matching a known crash signature.",
+                exit_code, signal
+            ),
+            advice: vec![
+                "Run 'crabblox doctor' to verify system readiness (Darling, Vulkan, audio, limits).".to_string(),
+                "Review the log snippet below for error details or consult the Crabblox community.".to_string(),
+            ],
+        });
+    }
+
+    if !diagnoses.is_empty() {
         eprintln!("Identified Crash Signatures & Recommendations:\n");
-        for diag in found_diagnostics {
-            eprintln!("{}\n", diag);
+        for diag in &diagnoses {
+            eprintln!("• {}:\n  {}\n  Troubleshooting recommendations:", diag.title, diag.description);
+            for adv in &diag.advice {
+                eprintln!("    - {}", adv);
+            }
+            eprintln!();
         }
     } else {
         eprintln!("No specific known signature matched. Review the log snippet below.\n");
@@ -943,6 +1090,8 @@ pub fn scan_crash_diagnostics(log_path: &Path) {
         eprintln!("--- End of Log Tail ---");
     }
     eprintln!("=======================================================\n");
+
+    diagnoses
 }
 
 fn read_log_tail(log_path: &Path, max_bytes: u64) -> std::io::Result<String> {
@@ -976,7 +1125,8 @@ mod tests {
         writeln!(file, "RobloxPlayer[1234]: Segmentation fault: 11 (SIGSEGV)").unwrap();
         writeln!(file, "darlingserver: child exited with signal 11").unwrap();
 
-        scan_crash_diagnostics(temp.path());
+        let diags = scan_crash_diagnostics(temp.path());
+        assert!(diags.iter().any(|d| d.category == CrashCategory::SegmentationFault));
     }
 
     #[test]
@@ -986,7 +1136,8 @@ mod tests {
         writeln!(file, "dyld: Symbol not found: _OBJC_CLASS_$_CoreML").unwrap();
         writeln!(file, "dyld: Library not loaded: @rpath/CoreML.framework/CoreML").unwrap();
 
-        scan_crash_diagnostics(temp.path());
+        let diags = scan_crash_diagnostics(temp.path());
+        assert!(diags.iter().any(|d| d.category == CrashCategory::DyldLinkFailure));
     }
 
     #[test]
@@ -996,7 +1147,43 @@ mod tests {
         writeln!(file, "Cannot connect to darlingserver: Connection refused").unwrap();
         writeln!(file, "Failed to connect to darlingserver at .darlingserver.sock").unwrap();
 
-        scan_crash_diagnostics(temp.path());
+        let diags = scan_crash_diagnostics(temp.path());
+        assert!(diags.iter().any(|d| d.category == CrashCategory::DarlingServerFailure));
+    }
+
+    #[test]
+    fn test_scan_crash_diagnostics_oom_log() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let mut file = temp.as_file();
+        writeln!(file, "RobloxPlayer[2048]: fatal error: out of memory (cannot allocate 268435456 bytes)").unwrap();
+        writeln!(file, "darlingserver: memory exhausted").unwrap();
+
+        let diags = scan_crash_diagnostics(temp.path());
+        assert!(diags.iter().any(|d| d.category == CrashCategory::OutOfMemory));
+    }
+
+    #[test]
+    fn test_scan_crash_diagnostics_oom_signal() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let diags = scan_crash_diagnostics_with_exit(temp.path(), Some(137), Some(9));
+        assert!(diags.iter().any(|d| d.category == CrashCategory::OutOfMemory));
+    }
+
+    #[test]
+    fn test_scan_crash_diagnostics_permission() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let mut file = temp.as_file();
+        writeln!(file, "darling: failed to open /dev/mach: Permission denied").unwrap();
+
+        let diags = scan_crash_diagnostics_with_exit(temp.path(), Some(126), None);
+        assert!(diags.iter().any(|d| d.category == CrashCategory::PermissionOrSandbox));
+    }
+
+    #[test]
+    fn test_scan_crash_diagnostics_status_segfault() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let diags = scan_crash_diagnostics_with_exit(temp.path(), Some(139), Some(11));
+        assert!(diags.iter().any(|d| d.category == CrashCategory::SegmentationFault));
     }
 
     #[test]
