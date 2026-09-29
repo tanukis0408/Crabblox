@@ -81,7 +81,7 @@ impl DoctorReport {
 
     pub fn print_cli(&self) {
         println!("\n=======================================================");
-        println!("             Crabblox System Doctor (by Monster Dev)   ");
+        println!("        Crabblox System Doctor {} (by Monster Dev)     ", env!("CARGO_PKG_VERSION"));
         println!("=======================================================");
         println!("Checking system components and environment readiness...\n");
 

@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "crabblox")]
+#[command(version)]
 #[command(about = "Crabblox — High-performance Rust launcher for Roblox on Linux (by Monster Dev)", long_about = None)]
 struct Cli {
     #[command(subcommand)]

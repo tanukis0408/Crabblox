@@ -1,4 +1,4 @@
 """Mac O’ Blox launcher."""
 
-# Launcher release, shown on the Play page. Next: 0.14.
-__version__ = "0.13"
+# Launcher release, shown on the Play page.
+__version__ = "0.0.1"

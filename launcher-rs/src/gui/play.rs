@@ -761,7 +761,8 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
     root.append(&status_page);
 
     // Footer version
-    let version_label = gtk4::Label::new(Some("Crabblox 0.13 • Monster Dev"));
+    let footer_text = format!("Crabblox {} • Monster Dev", env!("CARGO_PKG_VERSION"));
+    let version_label = gtk4::Label::new(Some(&footer_text));
     version_label.add_css_class("dim-label");
     version_label.add_css_class("caption");
     version_label.set_margin_bottom(12);
