@@ -484,6 +484,33 @@ pub fn roblox_pids() -> Vec<i32> {
                 let cmdline = entry.path().join("cmdline");
                 if let Ok(bytes) = fs::read(cmdline) {
                     let cmd = String::from_utf8_lossy(&bytes);
+                    if cmd.contains("RobloxPlayer")
+                        && !cmd.contains("RobloxCrashHandler")
+                        && !cmd.contains("darling shell")
+                        && !cmd.contains("crabblox")
+                    {
+                        pids.push(pid);
+                    }
+                }
+            }
+        }
+    }
+    pids
+}
+
+pub fn all_roblox_pids() -> Vec<i32> {
+    let mut pids = Vec::new();
+    let my_pid = std::process::id() as i32;
+    if let Ok(entries) = fs::read_dir("/proc") {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if let Ok(pid) = name.to_string_lossy().parse::<i32>() {
+                if pid == my_pid {
+                    continue;
+                }
+                let cmdline = entry.path().join("cmdline");
+                if let Ok(bytes) = fs::read(cmdline) {
+                    let cmd = String::from_utf8_lossy(&bytes);
                     if (cmd.contains("RobloxPlayer") || cmd.contains("RobloxCrashHandler"))
                         && !cmd.contains("darling shell")
                         && !cmd.contains("crabblox")
@@ -498,15 +525,15 @@ pub fn roblox_pids() -> Vec<i32> {
 }
 
 pub fn stop_roblox() {
-    let pids = roblox_pids();
+    let pids = all_roblox_pids();
     for pid in &pids {
         unsafe {
             libc::kill(*pid, libc::SIGTERM);
         }
     }
     if !pids.is_empty() {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        for pid in roblox_pids() {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        for pid in all_roblox_pids() {
             unsafe {
                 libc::kill(pid, libc::SIGKILL);
             }

@@ -100,10 +100,11 @@ main() {
     # Ensure remote origin is configured
     git -C "$DIR" remote set-url origin "$REPO" 2>/dev/null || true
     # Discard any local modifications to tracked files
+    git -C "$DIR" checkout -f -- . 2>/dev/null || true
     git -C "$DIR" reset --hard HEAD 2>/dev/null || true
     
     if git -C "$DIR" fetch --prune origin main 2>/dev/null && \
-       git -C "$DIR" checkout -B main origin/main 2>/dev/null && \
+       git -C "$DIR" checkout -f -B main origin/main 2>/dev/null && \
        git -C "$DIR" reset --hard origin/main 2>/dev/null; then
       # Clean untracked residue, preserving user data, prebuilt binaries, cookies, and backups
       git -C "$DIR" clean -fd -e "RobloxPlayer.app" -e "downloads" -e "backups" -e "build" -e "Cookies.plist" -e "*.plist" -e "accounts.json" -e "launcher-rs/target" 2>/dev/null || true

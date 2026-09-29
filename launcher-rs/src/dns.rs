@@ -1,10 +1,11 @@
 use std::collections::HashMap;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::sync::{broadcast, Mutex};
 
+#[allow(dead_code)]
 pub const ROBLOX_EDGE_IPS: [&str; 3] = ["128.116.5.3", "128.116.21.3", "128.116.115.3"];
 
 struct CacheEntry {
@@ -101,10 +102,11 @@ async fn handle_query(
 ) {
     let (qname, qtype) = extract_qname_and_type(&query);
 
-    // Direct routing for auth.roblox.com to avoid TSPU / Russian Cloudflare blocks
+    // Direct routing for auth.roblox.com to avoid TSPU connection drops (prioritize working CF node 104.18.2.63)
+    // Never route to ROBLOX_EDGE_IPS which returns HTTP 404 and breaks quick sign-in & session restoration
     if qname == "auth.roblox.com" {
         let resp = if qtype == 1 {
-            make_a_response(&query, &ROBLOX_EDGE_IPS)
+            make_a_response(&query, &["104.18.2.63", "104.18.3.63"])
         } else {
             make_empty_response(&query)
         };
@@ -158,10 +160,16 @@ async fn handle_query(
         }
     }
 
-    // Resolve via DNS-over-HTTPS (Google or Quad9)
-    let upstream_resp = resolve_doh(&query).await;
+    // 1. Fast UDP resolution to local systemd-resolved (0.4ms) or public DNS (15ms)
+    let upstream_resp = if let Some(resp) = resolve_udp(&query).await {
+        Some(resp)
+    } else {
+        // 2. Fallback to DNS-over-HTTPS (Google) with keep-alive connection pool
+        resolve_doh(&query).await
+    };
+
     if let Some(raw_resp) = upstream_resp {
-        let mut sanitized = sanitize_response(&raw_resp);
+        let mut sanitized = sanitize_response(&raw_resp, &qname);
         if sanitized.len() >= 2 && query.len() >= 2 {
             sanitized[0..2].copy_from_slice(&query[0..2]);
         }
@@ -176,7 +184,7 @@ async fn handle_query(
                 cache_lock.insert(
                     key,
                     CacheEntry {
-                        expires_at: now + Duration::from_secs(60),
+                        expires_at: now + Duration::from_secs(300),
                         response: sanitized[2..].to_vec(),
                     },
                 );
@@ -186,7 +194,7 @@ async fn handle_query(
         }
     }
 
-    // Fallback: Resolve via direct host system socket resolver if DoH failed, timed out, or returned no answers
+    // 3. Fallback: Resolve via direct host system socket resolver if upstream failed, timed out, or returned no answers
     if qtype == 1 && !qname.is_empty() {
         let host_lookup = match tokio::net::lookup_host(format!("{qname}:443")).await {
             Ok(addrs) => Ok(addrs),
@@ -200,7 +208,7 @@ async fn handle_query(
                     let octets = v4.ip().octets();
                     let is_cf = (octets[0] == 104 && (16..=31).contains(&octets[1]))
                         || (octets[0] == 172 && (64..=71).contains(&octets[1]));
-                    if is_cf {
+                    if is_cf && !qname.eq_ignore_ascii_case("auth.roblox.com") {
                         ips.push("128.116.5.3".to_string());
                     } else {
                         ips.push(v4.ip().to_string());
@@ -215,7 +223,7 @@ async fn handle_query(
                     cache_lock.insert(
                         key,
                         CacheEntry {
-                            expires_at: now + Duration::from_secs(60),
+                            expires_at: now + Duration::from_secs(300),
                             response: resp[2..].to_vec(),
                         },
                     );
@@ -329,35 +337,60 @@ fn make_empty_response(query: &[u8]) -> Vec<u8> {
     resp
 }
 
+static DOH_AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+
+fn doh_agent() -> &'static ureq::Agent {
+    DOH_AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout_connect(Duration::from_millis(400))
+            .timeout_read(Duration::from_millis(400))
+            .timeout_write(Duration::from_millis(400))
+            .build()
+    })
+}
+
+async fn resolve_udp(query: &[u8]) -> Option<Vec<u8>> {
+    let upstream_servers = [
+        "127.0.0.53:53",
+        "8.8.8.8:53",
+        "77.88.8.8:53",
+    ];
+
+    let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
+    let mut buf = [0u8; 4096];
+
+    for server in upstream_servers {
+        if sock.send_to(query, server).await.is_ok() {
+            if let Ok(Ok((len, _))) = tokio::time::timeout(Duration::from_millis(150), sock.recv_from(&mut buf)).await {
+                if len >= 12 && buf[..2] == query[..2] {
+                    let answers = u16::from_be_bytes([buf[6], buf[7]]);
+                    if answers > 0 {
+                        return Some(buf[..len].to_vec());
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
 async fn resolve_doh(query: &[u8]) -> Option<Vec<u8>> {
     let query_bytes = query.to_vec();
     tokio::task::spawn_blocking(move || {
-        let doh_endpoints = [
-            "https://dns.google/dns-query",
-            "https://cloudflare-dns.com/dns-query",
-            "https://dns.quad9.net/dns-query",
-        ];
-        for url in doh_endpoints {
-            let resp = ureq::post(url)
-                .set("Content-Type", "application/dns-message")
-                .set("Accept", "application/dns-message")
-                .timeout(Duration::from_secs(2))
-                .send_bytes(&query_bytes);
+        let agent = doh_agent();
+        let resp = agent.post("https://dns.google/dns-query")
+            .set("Content-Type", "application/dns-message")
+            .set("Accept", "application/dns-message")
+            .timeout(Duration::from_millis(400))
+            .send_bytes(&query_bytes);
 
-            match resp {
-                Ok(response) => {
-                    if response.status() == 200 {
-                        use std::io::Read;
-                        let mut reader = response.into_reader().take(65536);
-                        let mut out = Vec::new();
-                        if std::io::copy(&mut reader, &mut out).is_ok() && out.len() >= 12 {
-                            return Some(out);
-                        }
-                    }
-                }
-                Err(_) => {
-                    // Try next DoH provider if this one times out or errors
-                    continue;
+        if let Ok(response) = resp {
+            if response.status() == 200 {
+                use std::io::Read;
+                let mut reader = response.into_reader().take(65536);
+                let mut out = Vec::new();
+                if std::io::copy(&mut reader, &mut out).is_ok() && out.len() >= 12 {
+                    return Some(out);
                 }
             }
         }
@@ -368,8 +401,12 @@ async fn resolve_doh(query: &[u8]) -> Option<Vec<u8>> {
     .flatten()
 }
 
-fn sanitize_response(response: &[u8]) -> Vec<u8> {
+fn sanitize_response(response: &[u8], qname: &str) -> Vec<u8> {
     if response.len() < 12 {
+        return response.to_vec();
+    }
+    // Never rewrite auth.roblox.com Cloudflare addresses, as it is strictly hosted on Cloudflare
+    if qname.eq_ignore_ascii_case("auth.roblox.com") {
         return response.to_vec();
     }
     let mut res = response.to_vec();
@@ -483,6 +520,24 @@ mod tests {
         let a_resp = make_a_response(&query, &["1.2.3.4"]);
         assert_eq!(&a_resp[..2], &[0xaa, 0xbb]);
         assert!(a_resp.len() > query.len());
+    }
+
+    #[test]
+    fn test_sanitize_response_cloudflare_rewrite() {
+        let query = [
+            0x11, 0x22, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x06, b'r', b'o', b'b', b'l', b'o', b'x', 0x03, b'c', b'o', b'm', 0x00,
+            0x00, 0x01, 0x00, 0x01,
+        ];
+        // Cloudflare IP: 104.18.2.63
+        let cf_resp = make_a_response(&query, &["104.18.2.63"]);
+        let sanitized = sanitize_response(&cf_resp, "roblox.com");
+        // For general roblox.com, it should rewrite to 128.116.5.3
+        assert!(sanitized.windows(4).any(|w| w == [128, 116, 5, 3]));
+
+        // For auth.roblox.com, it should PRESERVE Cloudflare IP 104.18.2.63
+        let auth_sanitized = sanitize_response(&cf_resp, "auth.roblox.com");
+        assert!(auth_sanitized.windows(4).any(|w| w == [104, 18, 2, 63]));
     }
 }
 

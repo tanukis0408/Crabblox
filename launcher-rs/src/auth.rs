@@ -127,9 +127,6 @@ pub fn write_session_cookie_files(paths: &Paths, cookie_val: &str) {
 }
 
 pub fn ensure_session_restored(paths: &Paths) -> bool {
-    if signed_in_from_plist(paths) {
-        return true;
-    }
     let accounts = load_accounts(paths);
     if let Some(acc) = accounts.first() {
         if !acc.cookie.trim().is_empty() {
@@ -144,7 +141,7 @@ pub fn ensure_session_restored(paths: &Paths) -> bool {
             return true;
         }
     }
-    false
+    signed_in_from_plist(paths)
 }
 
 pub fn validate_cookie(cookie: &str) -> anyhow::Result<UserInfo> {
@@ -221,23 +218,39 @@ pub fn accounts_file(paths: &Paths) -> std::path::PathBuf {
 }
 
 pub fn load_accounts(paths: &Paths) -> Vec<SavedAccount> {
-    let file = accounts_file(paths);
-    if let Ok(content) = fs::read_to_string(&file) {
-        if let Ok(accounts) = serde_json::from_str::<Vec<SavedAccount>>(&content) {
-            return accounts;
+    let candidates = [
+        accounts_file(paths),
+        paths.data_dir.join("accounts.json"),
+        paths.project_dir.join("accounts.json"),
+        dirs::home_dir().map(|h| h.join(".config/macoblox/accounts.json")).unwrap_or_default(),
+    ];
+    for file in &candidates {
+        if let Ok(content) = fs::read_to_string(file) {
+            if let Ok(accounts) = serde_json::from_str::<Vec<SavedAccount>>(&content) {
+                if !accounts.is_empty() {
+                    return accounts;
+                }
+            }
         }
     }
     Vec::new()
 }
 
 pub fn save_accounts(paths: &Paths, accounts: &[SavedAccount]) -> anyhow::Result<()> {
-    let file = accounts_file(paths);
-    let parent = file.parent().ok_or_else(|| anyhow::anyhow!("Invalid accounts path"))?;
-    fs::create_dir_all(parent)?;
     let content = serde_json::to_string_pretty(accounts)?;
-    let tmp_file = parent.join(format!(".accounts.json.tmp.{}", std::process::id()));
-    fs::write(&tmp_file, content)?;
-    fs::rename(&tmp_file, &file)?;
+    let targets = [
+        accounts_file(paths),
+        paths.data_dir.join("accounts.json"),
+    ];
+    for file in &targets {
+        if let Some(parent) = file.parent() {
+            let _ = fs::create_dir_all(parent);
+            let tmp_file = parent.join(format!(".accounts.json.tmp.{}", std::process::id()));
+            if fs::write(&tmp_file, &content).is_ok() {
+                let _ = fs::rename(&tmp_file, file);
+            }
+        }
+    }
     Ok(())
 }
 
