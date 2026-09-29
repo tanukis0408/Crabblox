@@ -396,13 +396,20 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
         let p = paths_play.clone();
 
         // If game is running, clicking the button stops it
-        if !runner::roblox_pids().is_empty() || btn.label().as_deref() == Some("Остановить игру") {
+        if btn.label().as_deref() == Some("Остановить игру") {
             btn.set_sensitive(false);
             btn.set_label("Остановка…");
-            std::thread::spawn(|| {
+            let tx_stop = tx.clone();
+            std::thread::spawn(move || {
                 runner::stop_roblox();
+                let _ = tx_stop.send_blocking(PlayState::Stopped);
             });
             return;
+        }
+
+        // If there are stale leftover processes from a crashed game, clean them up before starting
+        if !runner::roblox_pids().is_empty() {
+            runner::stop_roblox();
         }
 
         // If Roblox is NOT installed, run install flow!

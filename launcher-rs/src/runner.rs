@@ -86,9 +86,8 @@ impl HostAudio {
             }
         }
 
-        // Open read-write so the FIFO stays open continuously
+        // Open write-only non-blocking so the writer stays open continuously
         let keep_file = fs::OpenOptions::new()
-            .read(true)
             .write(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(&fifo_path)
@@ -96,9 +95,9 @@ impl HostAudio {
 
         use std::os::unix::io::AsRawFd;
         unsafe {
-            // Expand pipe buffer from default 64KB to 256KB (~740ms headroom)
-            // to completely eliminate buffer backpressure or write stalls
-            libc::fcntl(keep_file.as_raw_fd(), libc::F_SETPIPE_SZ, 262144);
+            // Buffer size ~32KB (~93ms of 44.1kHz f32 stereo headroom)
+            // prevents audio latency lag (~740ms with 256KB) while allowing smooth playback
+            libc::fcntl(keep_file.as_raw_fd(), libc::F_SETPIPE_SZ, 32768);
         }
 
         let mut cmd = Command::new(player_bin);
@@ -257,6 +256,7 @@ pub fn process_state(pid: i32) -> Option<char> {
     Some(state)
 }
 
+#[allow(dead_code)]
 pub fn get_parent_pid(pid: i32) -> Option<i32> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let after_comm = stat.rsplit(')').next()?;
@@ -387,16 +387,6 @@ pub fn clear_stale_darling(prefix: &std::path::Path) {
         if let Ok(pid) = content.trim().parse::<i32>() {
             let state = process_state(pid);
             if state.is_none() || state == Some('Z') {
-                if state == Some('Z') {
-                    if let Some(ppid) = get_parent_pid(pid) {
-                        unsafe {
-                            libc::kill(ppid, libc::SIGKILL);
-                        }
-                        let _ = Command::new("sudo")
-                            .args(["-n", "kill", "-9", &ppid.to_string()])
-                            .status();
-                    }
-                }
                 let _ = fs::remove_file(&init_pid_path);
                 let _ = fs::remove_file(&sock_path);
             }
@@ -568,7 +558,7 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     // Warm up darlingserver if not running
     if !is_darlingserver_running(&paths.darling_prefix) {
         let warmup = Command::new("darling")
-            .args(["shell", "/bin/true"])
+            .args(["shell", "/usr/bin/true"])
             .env("DPREFIX", &paths.darling_prefix)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -579,7 +569,7 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
             if !status.success() {
                 restart_darling(&paths.darling_prefix);
                 let _ = Command::new("darling")
-                    .args(["shell", "/bin/true"])
+                    .args(["shell", "/usr/bin/true"])
                     .env("DPREFIX", &paths.darling_prefix)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())

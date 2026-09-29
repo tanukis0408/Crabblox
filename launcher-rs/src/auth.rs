@@ -227,7 +227,9 @@ pub fn import_browser_cookies(paths: &Paths) -> anyhow::Result<Option<(String, S
         ("Chromium (Snap)", home.join("snap/chromium/common/chromium")),
         ("Chromium (Snap Alt)", home.join("snap/chromium/current/.config/chromium")),
         ("Chrome (Flatpak)", home.join(".var/app/com.google.Chrome/config/google-chrome")),
+        ("Chrome Dev (Flatpak)", home.join(".var/app/com.google.ChromeDev/config/google-chrome-unstable")),
         ("Chromium (Flatpak)", home.join(".var/app/org.chromium.Chromium/config/chromium")),
+        ("Ungoogled Chromium (Flatpak)", home.join(".var/app/io.github.ungoogled_software.ungoogled_chromium/config/chromium")),
         ("Brave (Flatpak)", home.join(".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser")),
         ("Edge (Flatpak)", home.join(".var/app/com.microsoft.Edge/config/microsoft-edge")),
         ("Vivaldi (Flatpak)", home.join(".var/app/com.vivaldi.Vivaldi/config/vivaldi")),
@@ -249,8 +251,10 @@ pub fn import_browser_cookies(paths: &Paths) -> anyhow::Result<Option<(String, S
 
     // Gecko-based browsers (Firefox, Zen, Floorp, LibreWolf, Waterfox, etc.)
     let gecko_patterns = [
+        ("Firefox (XDG)", home.join(".config/mozilla/firefox")),
         ("Firefox", home.join(".mozilla/firefox")),
         ("Firefox (Snap)", home.join("snap/firefox/common/.mozilla/firefox")),
+        ("Firefox (Snap Alt)", home.join("snap/firefox/current/.mozilla/firefox")),
         ("Firefox (Flatpak)", home.join(".var/app/org.mozilla.firefox/.mozilla/firefox")),
         ("Zen Browser", home.join(".zen")),
         ("Zen Browser (Flatpak)", home.join(".var/app/app.zen_browser.zen/.zen")),
@@ -259,6 +263,8 @@ pub fn import_browser_cookies(paths: &Paths) -> anyhow::Result<Option<(String, S
         ("LibreWolf", home.join(".librewolf")),
         ("LibreWolf (Flatpak)", home.join(".var/app/io.gitlab.librewolf-community/.librewolf")),
         ("Waterfox", home.join(".waterfox")),
+        ("Waterfox (Flatpak)", home.join(".var/app/net.waterfox.waterfox/.waterfox")),
+        ("Waterfox (Flatpak Alt)", home.join(".var/app/net.waterfox.waterfox/.mozilla/firefox")),
     ];
 
     for (bname, base) in gecko_patterns {
@@ -329,6 +335,14 @@ fn get_chromium_passwords() -> Vec<Vec<u8>> {
         "vivaldi",
         "yandex-browser",
         "thorium",
+        "com.google.Chrome",
+        "com.google.ChromeDev",
+        "org.chromium.Chromium",
+        "io.github.ungoogled_software.ungoogled_chromium",
+        "com.brave.Browser",
+        "com.microsoft.Edge",
+        "com.vivaldi.Vivaldi",
+        "com.opera.Opera",
     ];
 
     for app in app_names {
@@ -462,7 +476,7 @@ fn extract_chromium_cookies(db_path: &Path, passwords: &[Vec<u8>]) -> Vec<String
         }
     }
 
-    let conn = match Connection::open_with_flags(&tmp_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+    let conn = match Connection::open_with_flags(&tmp_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE) {
         Ok(c) => c,
         Err(_) => return results,
     };
@@ -550,7 +564,7 @@ fn extract_gecko_cookies(db_path: &Path) -> Vec<String> {
         }
     }
 
-    let conn = match Connection::open_with_flags(&tmp_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY) {
+    let conn = match Connection::open_with_flags(&tmp_db, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE) {
         Ok(c) => c,
         Err(_) => return results,
     };
