@@ -58,6 +58,8 @@ impl DnsForwarder {
             }
         });
 
+        tokio::spawn(prewarm_dns());
+
         Ok(Self { port, shutdown_tx })
     }
 
@@ -69,6 +71,25 @@ impl DnsForwarder {
 impl Drop for DnsForwarder {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+
+pub async fn prewarm_dns() {
+    let domains = [
+        "roblox.com",
+        "www.roblox.com",
+        "users.roblox.com",
+        "auth.roblox.com",
+        "setup.rbxcdn.com",
+        "assetdelivery.roblox.com",
+        "clientsettingscdn.roblox.com",
+    ];
+
+    for domain in domains {
+        let d = domain.to_string();
+        tokio::spawn(async move {
+            let _ = tokio::net::lookup_host(format!("{d}:443")).await;
+        });
     }
 }
 

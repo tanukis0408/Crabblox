@@ -50,6 +50,9 @@ where
     let downloads = paths.downloads_dir();
     fs::create_dir_all(&downloads)?;
 
+    // Disk space pre-flight check: ensure at least 1.5 GB is available
+    crate::runner::check_disk_space(&downloads, 1500 * 1024 * 1024)?;
+
     let archive = downloads.join(format!("{upload}-RobloxPlayer.zip"));
     let part = downloads.join(format!("{upload}-RobloxPlayer.zip.part"));
 
@@ -63,23 +66,71 @@ where
     if need_download {
         let url = format!("https://setup.rbxcdn.com/mac/{upload}-RobloxPlayer.zip");
         let mut attempts = 0;
-        let max_attempts = 3;
+        let max_attempts = 4;
         loop {
             attempts += 1;
-            progress(0.1, &format!("Connecting to download server (attempt {attempts}/{max_attempts})..."));
+            let existing_offset = if part.exists() {
+                fs::metadata(&part).map(|m| m.len()).unwrap_or(0)
+            } else {
+                0
+            };
+
+            let is_resuming = existing_offset > 0;
+            if is_resuming {
+                progress(
+                    0.05,
+                    &format!(
+                        "Возобновление загрузки с {} МБ (попытка {attempts}/{max_attempts})...",
+                        existing_offset >> 20
+                    ),
+                );
+            } else {
+                progress(
+                    0.05,
+                    &format!("Подключение к серверу загрузки (попытка {attempts}/{max_attempts})..."),
+                );
+            }
 
             let res: Result<(), anyhow::Error> = (|| {
-                let resp = ureq::get(&url)
+                let mut req = ureq::get(&url)
                     .set("User-Agent", "Crabblox/Linux")
-                    .timeout(std::time::Duration::from_secs(60))
-                    .call()?;
+                    .timeout(std::time::Duration::from_secs(60));
 
-                let total_size: usize = resp.header("Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0);
+                if existing_offset > 0 {
+                    req = req.set("Range", &format!("bytes={existing_offset}-"));
+                }
+
+                let resp = match req.call() {
+                    Ok(r) => r,
+                    Err(ureq::Error::Status(416, _)) => {
+                        // Range Not Satisfiable: cached file might be complete or corrupted, re-download
+                        let _ = fs::remove_file(&part);
+                        ureq::get(&url)
+                            .set("User-Agent", "Crabblox/Linux")
+                            .timeout(std::time::Duration::from_secs(60))
+                            .call()?
+                    }
+                    Err(e) => return Err(e.into()),
+                };
+
+                let is_partial = resp.status() == 206;
+                let (total_size, mut out) = if is_partial && existing_offset > 0 {
+                    let content_range = resp.header("Content-Range");
+                    let total = content_range
+                        .and_then(|cr| cr.split('/').last())
+                        .and_then(|s| s.parse::<u64>().ok())
+                        .unwrap_or(0);
+                    let file = fs::OpenOptions::new().append(true).open(&part)?;
+                    (total, file)
+                } else {
+                    let total: u64 = resp.header("Content-Length").and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let file = fs::File::create(&part)?;
+                    (total, file)
+                };
+
                 let mut reader = resp.into_reader();
-                let mut out = fs::File::create(&part)?;
-
                 let mut buf = [0u8; 65536];
-                let mut downloaded: usize = 0;
+                let mut downloaded = if is_partial { existing_offset } else { 0 };
 
                 loop {
                     let n = std::io::Read::read(&mut reader, &mut buf)?;
@@ -87,45 +138,51 @@ where
                         break;
                     }
                     std::io::Write::write_all(&mut out, &buf[..n])?;
-                    downloaded += n;
+                    downloaded += n as u64;
                     if total_size > 0 {
-                        let frac = 0.1 + (downloaded as f32 / total_size as f32) * 0.8;
+                        let frac = 0.05 + (downloaded as f32 / total_size as f32) * 0.85;
                         progress(
                             frac,
                             &format!(
-                                "Downloading: {} / {} MB",
+                                "Загрузка: {} / {} МБ ({:.0}%)",
                                 downloaded >> 20,
-                                total_size >> 20
+                                total_size >> 20,
+                                (downloaded as f32 / total_size as f32) * 100.0
                             ),
                         );
                     }
                 }
 
                 if total_size > 0 && downloaded < total_size {
-                    let _ = fs::remove_file(&part);
-                    anyhow::bail!("Incomplete download: {downloaded}/{total_size} bytes");
+                    anyhow::bail!("Неполная загрузка: {downloaded}/{total_size} байт");
                 }
                 Ok(())
             })();
 
             match res {
                 Ok(()) => {
+                    // Verify zip integrity before renaming
+                    let file = fs::File::open(&part)?;
+                    if zip::ZipArchive::new(file).is_err() {
+                        let _ = fs::remove_file(&part);
+                        anyhow::bail!("Загруженный архив повреждён, требуется повторная загрузка.");
+                    }
                     fs::rename(&part, &archive)?;
                     break;
                 }
                 Err(e) => {
-                    let _ = fs::remove_file(&part);
                     if attempts >= max_attempts {
+                        let _ = fs::remove_file(&part);
                         return Err(e);
                     }
-                    progress(0.1, &format!("Download failed ({e}), retrying in 2 seconds..."));
+                    progress(0.05, &format!("Ошибка загрузки ({e}), повтор через 2 сек..."));
                     std::thread::sleep(std::time::Duration::from_secs(2));
                 }
             }
         }
     }
 
-    progress(0.92, "Unpacking RobloxPlayer.app...");
+    progress(0.92, "Распаковка RobloxPlayer.app...");
     let unpack_dir = tempfile::Builder::new().prefix("unpack-").tempdir_in(&downloads)?;
     let unpack_path = unpack_dir.path();
 
@@ -246,7 +303,34 @@ where
         let _ = crate::fast_flags::FastFlags::save(paths, &flags);
     }
 
-    progress(1.0, "Done");
+    // Keep only the 2 latest backups to prevent disk overflow
+    rotate_backups(&backups, 2);
+
+    progress(1.0, "Готово");
 
     Ok(backup_path)
+}
+
+pub fn rotate_backups(backups_dir: &std::path::Path, max_keep: usize) {
+    if let Ok(entries) = fs::read_dir(backups_dir) {
+        let mut list: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(mtime) = meta.modified() {
+                    list.push((mtime, path));
+                }
+            }
+        }
+        list.sort_by(|a, b| b.0.cmp(&a.0));
+        if list.len() > max_keep {
+            for (_, old_path) in list.into_iter().skip(max_keep) {
+                if old_path.is_dir() {
+                    let _ = fs::remove_dir_all(&old_path);
+                } else {
+                    let _ = fs::remove_file(&old_path);
+                }
+            }
+        }
+    }
 }

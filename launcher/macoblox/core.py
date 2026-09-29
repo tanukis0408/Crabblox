@@ -182,28 +182,39 @@ def update_roblox(upload, progress=None):
 
     if need_download:
         url = DOWNLOAD_URL.format(upload=upload)
-        for attempt in range(3):
+        for attempt in range(4):
             try:
-                request = urllib.request.Request(url, headers={"User-Agent": "MacOBlox"})
-                with urllib.request.urlopen(request, timeout=30) as response, open(part, "wb") as out:
-                    total = int(response.headers.get("Content-Length") or 0)
-                    done = 0
-                    while chunk := response.read(1 << 16):
-                        out.write(chunk)
-                        done += len(chunk)
-                        if progress and total:
-                            progress(done / total * 0.9, _("Downloading {done} of {total} MB",
-                                                              done=done >> 20, total=total >> 20))
+                headers = {"User-Agent": "MacOBlox"}
+                offset = part.stat().st_size if part.exists() else 0
+                if offset > 0:
+                    headers["Range"] = f"bytes={offset}-"
+                request = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    is_partial = getattr(response, "status", 200) == 206
+                    mode = "ab" if is_partial and offset > 0 else "wb"
+                    if not is_partial:
+                        offset = 0
+                    total = int(response.headers.get("Content-Length") or 0) + offset
+                    done = offset
+                    with open(part, mode) as out:
+                        while chunk := response.read(1 << 16):
+                            out.write(chunk)
+                            done += len(chunk)
+                            if progress and total:
+                                progress(done / total * 0.9, _("Downloading {done} of {total} MB",
+                                                                  done=done >> 20, total=total >> 20))
                 if total and done < total:
                     raise RuntimeError(f"Download incomplete: {done}/{total} bytes")
                 if not zipfile.is_zipfile(part):
+                    part.unlink(missing_ok=True)
                     raise RuntimeError(_("The download is not a zip archive"))
                 part.rename(archive)
                 break
             except Exception:
-                part.unlink(missing_ok=True)
-                if attempt == 2:
+                if attempt == 3:
+                    part.unlink(missing_ok=True)
                     raise
+                time.sleep(2)
 
     if progress:
         progress(0.92, _("Unpacking"))
@@ -236,6 +247,15 @@ def update_roblox(upload, progress=None):
         if APP_BUNDLE.exists():
             APP_BUNDLE.rename(backup)
         new_bundle.rename(APP_BUNDLE)
+
+        # Rotate old backups: keep at most 2 latest backups
+        try:
+            existing_backups = sorted(BACKUPS.glob("RobloxPlayer-*.app"), key=lambda p: p.stat().st_mtime, reverse=True)
+            for old_b in existing_backups[2:]:
+                shutil.rmtree(old_b, ignore_errors=True)
+        except Exception:
+            pass
+
         if flags:
             save_fast_flags(flags)
         if progress:

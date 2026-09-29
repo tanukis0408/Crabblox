@@ -26,18 +26,52 @@ pub struct HostAudio {
 }
 
 impl HostAudio {
+    pub fn is_pipewire_active() -> bool {
+        if std::env::var_os("PIPEWIRE_REMOTE").is_some() {
+            return true;
+        }
+        let uid = unsafe { libc::getuid() };
+        let pw_sock = std::path::PathBuf::from(format!("/run/user/{uid}/pipewire-0"));
+        if pw_sock.exists() {
+            return true;
+        }
+        if let Ok(runtime_dir) = std::env::var("XDG_RUNTIME_DIR") {
+            if std::path::Path::new(&runtime_dir).join("pipewire-0").exists() {
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn start(cache_dir: &std::path::Path) -> Option<Self> {
-        let player_bin = if Command::new("pw-cat").arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
-            || std::path::Path::new("/usr/bin/pw-cat").exists()
-        {
-            "pw-cat"
-        } else if Command::new("pacat").arg("--version").stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status().map(|s| s.success()).unwrap_or(false)
-            || std::path::Path::new("/usr/bin/pacat").exists()
-        {
-            "pacat"
+        let is_pw = Self::is_pipewire_active();
+
+        // Priority depending on whether PipeWire is the active sound server
+        let candidates = if is_pw {
+            vec!["pw-cat", "pw-play", "pacat", "paplay"]
         } else {
-            return None;
+            vec!["pacat", "paplay", "pw-cat", "pw-play"]
         };
+
+        let mut chosen_bin = None;
+        for bin in candidates {
+            if find_binary(bin).is_some()
+                || Command::new(bin)
+                    .arg("--version")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            {
+                chosen_bin = Some(bin);
+                break;
+            }
+        }
+
+        let player_bin = chosen_bin?;
+        let is_pipewire = player_bin == "pw-cat" || player_bin == "pw-play";
 
         fs::create_dir_all(cache_dir).ok()?;
         let fifo_path = cache_dir.join(format!("audio-{}.fifo", std::process::id()));
@@ -68,20 +102,22 @@ impl HostAudio {
         }
 
         let mut cmd = Command::new(player_bin);
-        if player_bin == "pw-cat" {
+        if is_pipewire {
             cmd.args([
                 "--playback", "--raw", "--format", "f32", "--rate", "44100",
-                "--channels", "2", "--latency", "60ms", "--media-role", "Game",
-                "-P", "{ application.name = \"Roblox\" media.name = \"Roblox (Crabblox)\" }",
+                "--channels", "2", "--latency", "50ms", "--media-role", "Game",
+                "-P", "{ application.name = \"Roblox\" application.process.binary = \"crabblox\" media.name = \"Roblox (Crabblox)\" node.name = \"Roblox\" node.latency = 256/44100 }",
                 fifo_path.to_str()?,
             ]);
+            cmd.env("PIPEWIRE_LATENCY", "256/44100");
         } else {
             cmd.args([
                 "--playback", "--raw", "--format=float32le", "--rate=44100",
-                "--channels=2", "--latency-msec=60", "--client-name=Roblox",
+                "--channels=2", "--latency-msec=50", "--client-name=Roblox",
                 "--stream-name=Roblox (Crabblox)", "--property=media.role=game",
                 fifo_path.to_str()?,
             ]);
+            cmd.env("PULSE_LATENCY_MSEC", "50");
         }
 
         let player = cmd
@@ -227,6 +263,119 @@ pub fn get_parent_pid(pid: i32) -> Option<i32> {
     ppid_str.parse::<i32>().ok()
 }
 
+pub fn check_disk_space(path: &std::path::Path, min_bytes: u64) -> anyhow::Result<()> {
+    let path_str = path.to_str().unwrap_or("/tmp");
+    let c_path = CString::new(path_str).map_err(|e| anyhow::anyhow!("Invalid path: {e}"))?;
+    unsafe {
+        let mut stat: libc::statvfs = std::mem::zeroed();
+        if libc::statvfs(c_path.as_ptr(), &mut stat) == 0 {
+            let free_bytes = (stat.f_bavail as u64) * (stat.f_bsize as u64);
+            if free_bytes < min_bytes {
+                let free_mb = free_bytes >> 20;
+                let min_mb = min_bytes >> 20;
+                anyhow::bail!(
+                    "Недостаточно свободного места на диске ({free_mb} МБ доступно, требуется минимум {min_mb} МБ)."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn raise_fd_limit() {
+    unsafe {
+        let mut rlim = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        if libc::getrlimit(libc::RLIMIT_NOFILE, &mut rlim) == 0 {
+            let target = 65536;
+            let new_cur = if rlim.rlim_max > 0 {
+                target.min(rlim.rlim_max)
+            } else {
+                target
+            };
+            if new_cur > rlim.rlim_cur {
+                rlim.rlim_cur = new_cur;
+                let _ = libc::setrlimit(libc::RLIMIT_NOFILE, &rlim);
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+pub struct GpuEnvironment {
+    pub is_nvidia: bool,
+    pub is_amd: bool,
+    pub is_hybrid: bool,
+    pub env_vars: Vec<(String, String)>,
+}
+
+pub fn detect_gpu_environment() -> GpuEnvironment {
+    let mut is_nvidia = false;
+    let mut is_amd = false;
+    let mut drm_card_count = 0;
+
+    if let Ok(entries) = fs::read_dir("/sys/class/drm") {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with("card") && !name.contains('-') {
+                drm_card_count += 1;
+                let uevent_path = entry.path().join("device/uevent");
+                if let Ok(uevent) = fs::read_to_string(&uevent_path) {
+                    let uevent_lower = uevent.to_lowercase();
+                    if uevent_lower.contains("driver=nvidia") || uevent_lower.contains("vendor=0x10de") {
+                        is_nvidia = true;
+                    }
+                    if uevent_lower.contains("driver=amdgpu") || uevent_lower.contains("driver=radeon") || uevent_lower.contains("vendor=0x1002") {
+                        is_amd = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if !is_nvidia && (std::path::Path::new("/proc/driver/nvidia").exists() || std::path::Path::new("/dev/nvidia0").exists()) {
+        is_nvidia = true;
+    }
+
+    let is_hybrid = drm_card_count >= 2;
+    let mut env_vars = Vec::new();
+
+    if is_nvidia {
+        env_vars.push(("__GL_SHADER_DISK_CACHE".into(), "1".into()));
+        env_vars.push(("__GL_SHADER_DISK_CACHE_SIZE".into(), "1073741824".into()));
+        if is_hybrid {
+            env_vars.push(("__NV_PRIME_RENDER_OFFLOAD".into(), "1".into()));
+            env_vars.push(("__GLX_VENDOR_LIBRARY_NAME".into(), "nvidia".into()));
+            env_vars.push(("__VK_LAYER_NV_optimus".into(), "NVIDIA_only".into()));
+        }
+    }
+
+    if is_amd {
+        env_vars.push(("RADV_PERFTEST".into(), "aco".into()));
+        env_vars.push(("AMD_VULKAN_ICD".into(), "RADV".into()));
+        if is_hybrid && !is_nvidia {
+            env_vars.push(("DRI_PRIME".into(), "1".into()));
+        }
+    }
+
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
+    let mvk_cache_dir = home.join(".cache/crabblox/vulkan_cache");
+    let _ = fs::create_dir_all(&mvk_cache_dir);
+    env_vars.push(("MVK_CONFIG_RESUME_NEW_PIPELINES_IMMEDIATELY".into(), "1".into()));
+    env_vars.push(("MVK_CONFIG_PREFILL_METAL_COMMAND_BUFFERS".into(), "3".into()));
+    env_vars.push(("VK_PIPELINE_CACHE_ENABLE".into(), "1".into()));
+    env_vars.push(("VK_PIPELINE_CACHE_PATH".into(), mvk_cache_dir.display().to_string()));
+
+    GpuEnvironment {
+        is_nvidia,
+        is_amd,
+        is_hybrid,
+        env_vars,
+    }
+}
+
 pub fn clear_stale_darling(prefix: &std::path::Path) {
     let init_pid_path = prefix.join(".init.pid");
     let sock_path = prefix.join(".darlingserver.sock");
@@ -254,6 +403,23 @@ pub fn clear_stale_darling(prefix: &std::path::Path) {
         }
     } else if sock_path.exists() {
         let _ = fs::remove_file(&sock_path);
+    }
+
+    // Also clean up any abandoned Darling sockets in /tmp for this user
+    let uid = unsafe { libc::getuid() };
+    let username = std::env::var("USER").unwrap_or_default();
+    let tmp_candidates = [
+        format!("/tmp/darling-{}", username),
+        format!("/tmp/darling-{}", uid),
+        format!("/tmp/darlingserver-{}", username),
+        format!("/tmp/darlingserver-{}", uid),
+    ];
+    for tmp_sock in tmp_candidates {
+        let path = std::path::Path::new(&tmp_sock);
+        if path.exists() && !is_darlingserver_running(prefix) {
+            let _ = fs::remove_file(path);
+            let _ = fs::remove_dir_all(path);
+        }
     }
 }
 
@@ -370,6 +536,12 @@ pub fn host_vram_bytes() -> u64 {
 pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     ensure_shim(paths)?;
 
+    // Raise file descriptor limits (ulimit -n) to prevent "Too many open files"
+    raise_fd_limit();
+
+    // Check disk space before launching: ensure at least 500 MB is available in Darling prefix
+    check_disk_space(&paths.darling_prefix, 500 * 1024 * 1024)?;
+
     let app_bundle = paths.app_bundle();
     let binary = app_bundle.join("Contents/MacOS/RobloxPlayer");
     if !binary.exists() {
@@ -437,6 +609,7 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     let _ = fs::create_dir_all(&shader_cache);
 
     let vram = host_vram_bytes();
+    let gpu_env = detect_gpu_environment();
 
     let mut args: Vec<String> = vec![
         "shell".into(),
@@ -453,7 +626,19 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         format!("__GL_SHADER_DISK_CACHE_PATH={}", home.join(".cache").display()),
         "mesa_glthread=true".into(),
         "MACOBLOX_MOUSE_SENSITIVITY=1.00".into(),
+        "PIPEWIRE_LATENCY=256/44100".into(),
+        "PULSE_LATENCY_MSEC=50".into(),
     ];
+
+    for (k, v) in &gpu_env.env_vars {
+        args.push(format!("{}={}", k, v));
+    }
+
+    if gpu_env.is_nvidia {
+        println!("GPU: NVIDIA (PRIME offload & 1GB shader cache active)");
+    } else if gpu_env.is_amd {
+        println!("GPU: AMD (RADV ACO shader compiler active)");
+    }
 
     let icon_file = paths.cache_dir.join("icon.argb");
     if icon_file.exists() {
@@ -575,6 +760,15 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     }
     if let Ok(noroot) = std::env::var("MACOBLOX_NOROOT_LIB") {
         cmd.env("LD_PRELOAD", noroot);
+    }
+
+    // PipeWire & PulseAudio latency environment
+    cmd.env("PIPEWIRE_LATENCY", "256/44100");
+    cmd.env("PULSE_LATENCY_MSEC", "50");
+
+    // GPU optimizations and PRIME offload variables
+    for (k, v) in gpu_env.env_vars {
+        cmd.env(k, v);
     }
 
     let child = cmd.spawn()?;
@@ -803,5 +997,30 @@ mod tests {
         writeln!(file, "Failed to connect to darlingserver at .darlingserver.sock").unwrap();
 
         scan_crash_diagnostics(temp.path());
+    }
+
+    #[test]
+    fn test_raise_fd_limit() {
+        raise_fd_limit();
+    }
+
+    #[test]
+    fn test_check_disk_space() {
+        let temp = tempfile::tempdir().unwrap();
+        // Should succeed for 1 MB
+        assert!(check_disk_space(temp.path(), 1024 * 1024).is_ok());
+        // Should fail for an impossible 1000 Terabytes
+        assert!(check_disk_space(temp.path(), 1000 * 1024 * 1024 * 1024 * 1024).is_err());
+    }
+
+    #[test]
+    fn test_detect_gpu_environment() {
+        let env = detect_gpu_environment();
+        assert!(env.env_vars.iter().any(|(k, _)| k == "VK_PIPELINE_CACHE_ENABLE"));
+    }
+
+    #[test]
+    fn test_is_pipewire_active() {
+        let _ = HostAudio::is_pipewire_active();
     }
 }
