@@ -101,13 +101,26 @@ main() {
     git -C "$DIR" remote set-url origin "$REPO" 2>/dev/null || true
     # Discard any local modifications to tracked files
     git -C "$DIR" reset --hard HEAD 2>/dev/null || true
-    # Fetch latest commits from remote main branch
-    git -C "$DIR" fetch --prune origin main
-    # Unconditionally align local branch with origin/main
-    git -C "$DIR" checkout -B main origin/main
-    git -C "$DIR" reset --hard origin/main
-    # Clean untracked residue, preserving user data like RobloxPlayer.app, downloads, and backups
-    git -C "$DIR" clean -fd -e "RobloxPlayer.app" -e "downloads" -e "backups" 2>/dev/null || true
+    
+    if git -C "$DIR" fetch --prune origin main 2>/dev/null && \
+       git -C "$DIR" checkout -B main origin/main 2>/dev/null && \
+       git -C "$DIR" reset --hard origin/main 2>/dev/null; then
+      # Clean untracked residue, preserving user data like RobloxPlayer.app, downloads, and backups
+      git -C "$DIR" clean -fd -e "RobloxPlayer.app" -e "downloads" -e "backups" 2>/dev/null || true
+    else
+      say "Repository in $DIR has conflicts or corruption, performing full clean re-sync..."
+      local tmp_save
+      tmp_save=$(mktemp -d)
+      [[ -d "$DIR/RobloxPlayer.app" ]] && mv "$DIR/RobloxPlayer.app" "$tmp_save/" 2>/dev/null || true
+      [[ -d "$DIR/downloads" ]] && mv "$DIR/downloads" "$tmp_save/" 2>/dev/null || true
+      [[ -d "$DIR/backups" ]] && mv "$DIR/backups" "$tmp_save/" 2>/dev/null || true
+      rm -rf "$DIR"
+      git clone --depth 1 "$REPO" "$DIR"
+      [[ -d "$tmp_save/RobloxPlayer.app" ]] && mv "$tmp_save/RobloxPlayer.app" "$DIR/" 2>/dev/null || true
+      [[ -d "$tmp_save/downloads" ]] && mv "$tmp_save/downloads" "$DIR/" 2>/dev/null || true
+      [[ -d "$tmp_save/backups" ]] && mv "$tmp_save/backups" "$DIR/" 2>/dev/null || true
+      rm -rf "$tmp_save"
+    fi
   else
     say "Downloading Crabblox"
     mkdir -p "$(dirname "$DIR")"
