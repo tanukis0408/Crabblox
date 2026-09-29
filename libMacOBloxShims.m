@@ -1127,14 +1127,27 @@ static void print_backtrace(void) {
     backtrace_symbols_fd(frames, n, 2);
 }
 
+static int ascii_contains_case_insensitive(const char* text, const char* needle);
+
 // Trace the exact resolver requests made by Roblox. A plain getaddrinfo probe
 // succeeds in Darling while Roblox reports DnsResolve, so the hints passed by
 // its networking layer are relevant to the failure.
-struct macoblox_addrinfo_head {
+struct macoblox_darwin_addrinfo {
     int ai_flags;
     int ai_family;
     int ai_socktype;
     int ai_protocol;
+    unsigned int ai_addrlen;
+    char *ai_canonname;
+    void *ai_addr;
+    struct macoblox_darwin_addrinfo *ai_next;
+};
+struct macoblox_darwin_sockaddr_in {
+    unsigned char sin_len;
+    unsigned char sin_family;
+    unsigned short sin_port;
+    unsigned int sin_addr;
+    char sin_zero[8];
 };
 extern int getaddrinfo(const char*, const char*, const void*, void**);
 extern int usleep(unsigned int);
@@ -1166,6 +1179,25 @@ static int macoblox_getaddrinfo(const char* node, const char* service,
     }
     __sync_lock_release(&macoblox_dns_lock);
 
+    // Sanitize any blocked Cloudflare IPs if system resolver returned them for Roblox domains
+    if (status == 0 && result && *result && node && ascii_contains_case_insensitive(node, "roblox.com")) {
+        struct macoblox_darwin_addrinfo* curr = (struct macoblox_darwin_addrinfo*)(*result);
+        while (curr) {
+            if (curr->ai_family == 2 /* AF_INET */ && curr->ai_addr) {
+                struct macoblox_darwin_sockaddr_in* sin = (struct macoblox_darwin_sockaddr_in*)curr->ai_addr;
+                unsigned int ip = sin->sin_addr;
+                unsigned char b0 = (unsigned char)(ip & 0xff);
+                unsigned char b1 = (unsigned char)((ip >> 8) & 0xff);
+                // 104.16.0.0 - 104.31.255.255, 172.64.0.0 - 172.71.255.255
+                if ((b0 == 104 && b1 >= 16 && b1 <= 31) || (b0 == 172 && b1 >= 64 && b1 <= 71)) {
+                    // Replace with Roblox edge gateway 128.116.5.3 (little endian order: 128 | 116<<8 | 5<<16 | 3<<24)
+                    sin->sin_addr = 128 | (116 << 8) | (5 << 16) | (3 << 24);
+                }
+            }
+            curr = curr->ai_next;
+        }
+    }
+
     const char* trace = getenv("MACOBLOX_TRACE_DNS");
     if (status != 0 || (trace && *trace == '1')) {
         write_str("[MacOBlox DNS] node=");
@@ -1173,8 +1205,8 @@ static int macoblox_getaddrinfo(const char* node, const char* service,
         write_str(" service=");
         write_str(service ? service : "(null)");
         if (hints) {
-            const struct macoblox_addrinfo_head* head =
-                (const struct macoblox_addrinfo_head*)hints;
+            const struct macoblox_darwin_addrinfo* head =
+                (const struct macoblox_darwin_addrinfo*)hints;
             write_str(" flags="); print_num(head->ai_flags);
             write_str(" family="); print_num(head->ai_family);
             write_str(" socktype="); print_num(head->ai_socktype);
@@ -3954,6 +3986,7 @@ static id macoblox_split_set_cookie(id header) {
     return result;
 }
 
+static void macoblox_remember_cookie(id cookie, int deleted);
 static id (*orig_cookies_with_response_headers)(id, SEL, id, id) = 0;
 static id cookies_with_response_headers(id cls, SEL cmd, id headers, id url) {
     (void)cls; (void)cmd;
@@ -3972,8 +4005,14 @@ static id cookies_with_response_headers(id cls, SEL cmd, id headers, id url) {
         for (unsigned long line = 0; line < line_count; line++) {
             id cookie = macoblox_cookie_from_string(
                 ((id (*)(id, SEL, unsigned long))objc_msgSend)(lines, sel_registerName("objectAtIndex:"), line), url);
-            if (cookie)
+            if (cookie) {
                 MSG1(void, cookies, "addObject:", cookie);
+                id cookie_name = MSG0(id, cookie, "name");
+                if (cookie_name && (MSG1(MacOBloxBool, cookie_name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY")) ||
+                                   MSG1(MacOBloxBool, cookie_name, "isEqualToString:", macoblox_nsstring("ROBLOSECURITY")))) {
+                    macoblox_remember_cookie(cookie, 0);
+                }
+            }
         }
     }
     return cookies;
@@ -4009,6 +4048,18 @@ static void macoblox_write_saved_cookies(void) {
     ((MacOBloxBool (*)(id, SEL, id, MacOBloxBool))objc_msgSend)(
         entries, sel_registerName("writeToFile:atomically:"), file, 0); // Darling leaves atomic writes as .tmpN files
     chmod(MSG0(const char*, file, "fileSystemRepresentation"), 0600);
+
+    id home = ((id (*)(void))dlsym(RTLD_DEFAULT, "NSHomeDirectory"))();
+    id crab_dir = MSG1(id, home, "stringByAppendingPathComponent:",
+                       macoblox_nsstring("Library/Crabblox"));
+    ((MacOBloxBool (*)(id, SEL, id, MacOBloxBool, id, id*))objc_msgSend)(
+        MSG0(id, objc_getClass("NSFileManager"), "defaultManager"),
+        sel_registerName("createDirectoryAtPath:withIntermediateDirectories:attributes:error:"),
+        crab_dir, 1, 0, 0);
+    id crab_file = MSG1(id, crab_dir, "stringByAppendingPathComponent:", macoblox_nsstring("Cookies.plist"));
+    ((MacOBloxBool (*)(id, SEL, id, MacOBloxBool))objc_msgSend)(
+        entries, sel_registerName("writeToFile:atomically:"), crab_file, 0);
+    chmod(MSG0(const char*, crab_file, "fileSystemRepresentation"), 0600);
 }
 
 static void macoblox_remember_cookie(id cookie, int deleted) {
@@ -4023,7 +4074,8 @@ static void macoblox_remember_cookie(id cookie, int deleted) {
     id expires = MSG0(id, cookie, "expiresDate");
     id now = MSG0(id, objc_getClass("NSDate"), "date");
     int persistent = expires && MSG1(long, expires, "compare:", now) == 1;
-    int is_security = name && MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY"));
+    int is_security = name && (MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring(".ROBLOSECURITY")) ||
+                              MSG1(MacOBloxBool, name, "isEqualToString:", macoblox_nsstring("ROBLOSECURITY")));
     if (is_security) {
         persistent = 1;
         if (!expires) {

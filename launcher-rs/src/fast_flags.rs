@@ -374,6 +374,32 @@ impl FastFlags {
             .unwrap_or(false)
     }
 
+    pub fn ensure_compatibility_flags(paths: &Paths) -> anyhow::Result<()> {
+        let mut flags = Self::load(paths);
+        let mut changed = false;
+
+        let compat_flags = [
+            ("FFlagCookieProtocolEnabled", serde_json::json!("False")),
+            ("DFFlagCookieProtocolEnabled", serde_json::json!("False")),
+            ("FFlagUnifiedCookieProtocolEnabled", serde_json::json!("False")),
+            ("DFFlagUnifiedCookieProtocolEnabled", serde_json::json!("False")),
+            ("FFlagUnifiedCookieProtocolEnabledSticky", serde_json::json!("False")),
+            ("DFFlagUnifiedCookieProtocolEnabledSticky", serde_json::json!("False")),
+        ];
+
+        for (k, v) in compat_flags {
+            if flags.get(k) != Some(&v) {
+                flags.insert(k.to_string(), v);
+                changed = true;
+            }
+        }
+
+        if changed {
+            Self::save(paths, &flags)?;
+        }
+        Ok(())
+    }
+
     // --- Helper methods to import and export JSON ---
     pub fn import_json(paths: &Paths, json_str: &str) -> anyhow::Result<usize> {
         let trimmed = json_str.trim();
@@ -530,5 +556,16 @@ mod tests {
         assert_eq!(parsed["flag1"], true);
         assert_eq!(parsed["flag2"], "value, with, commas");
         assert_eq!(parsed["flag3"], 42);
+    }
+
+    #[test]
+    fn test_ensure_compatibility_flags() {
+        let (_tmp, paths) = create_test_paths();
+        FastFlags::ensure_compatibility_flags(&paths).unwrap();
+        let flags = FastFlags::load(&paths);
+        assert_eq!(flags.get("FFlagCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
+        assert_eq!(flags.get("DFFlagCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
+        assert_eq!(flags.get("FFlagUnifiedCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
+        assert_eq!(flags.get("DFFlagUnifiedCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
     }
 }

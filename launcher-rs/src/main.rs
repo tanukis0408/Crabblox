@@ -67,6 +67,7 @@ enum Commands {
 fn main() -> anyhow::Result<()> {
     let raw_args: Vec<String> = std::env::args().collect();
     let paths = Arc::new(Paths::resolve());
+    let _ = fast_flags::FastFlags::ensure_compatibility_flags(&paths);
 
     if raw_args.len() > 1 && (raw_args[1].starts_with("roblox-player:") || raw_args[1].starts_with("roblox-studio:")) {
         println!("Crabblox received deep link: {}", raw_args[1]);

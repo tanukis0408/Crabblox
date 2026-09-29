@@ -557,6 +557,11 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         .map_err(|e| anyhow::anyhow!("Не удалось скачать и установить Roblox: {e}"))?;
     }
 
+    // Ensure FastFlags required for Darling compatibility (disable CookieProtocol for login sync)
+    if let Err(e) = crate::fast_flags::FastFlags::ensure_compatibility_flags(paths) {
+        eprintln!("Warning: failed to ensure compatibility FastFlags: {e}");
+    }
+
     // Clean any stale Darling mounts or state
     clear_stale_darling(&paths.darling_prefix);
 

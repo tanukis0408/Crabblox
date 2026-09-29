@@ -94,6 +94,17 @@ static int is_ip_literal(const char *node) {
     return digits_and_dots;
 }
 
+static int str_case_equal(const char *a, const char *b) {
+    if (!a || !b) return 0;
+    while (*a && *b) {
+        char ca = (*a >= 'A' && *a <= 'Z') ? (*a + ('a' - 'A')) : *a;
+        char cb = (*b >= 'A' && *b <= 'Z') ? (*b + ('a' - 'A')) : *b;
+        if (ca != cb) return 0;
+        a++; b++;
+    }
+    return *a == *b;
+}
+
 static int parse_port(const char *service, unsigned short *port) {
     unsigned int number = 0;
     if (!service) {
@@ -102,6 +113,14 @@ static int parse_port(const char *service, unsigned short *port) {
     }
     if (!*service)
         return 0;
+    if (str_case_equal(service, "https") || str_case_equal(service, "443")) {
+        *port = (unsigned short)((443 >> 8) | ((443 & 255) << 8));
+        return 1;
+    }
+    if (str_case_equal(service, "http") || str_case_equal(service, "80")) {
+        *port = (unsigned short)((80 >> 8) | ((80 & 255) << 8));
+        return 1;
+    }
     for (const char *c = service; *c; c++) {
         if (*c < '0' || *c > '9')
             return 0; /* named service: let the system resolve it */
