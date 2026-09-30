@@ -400,6 +400,15 @@ impl FastFlags {
             ("DFFlagDebugDisableRbxTransportDummyClient", serde_json::json!("True")),
             ("FFlagDebugDisableRbxTransportDummyServer", serde_json::json!("True")),
             ("DFFlagDebugDisableRbxTransportDummyServer", serde_json::json!("True")),
+            ("FFlagHangDetectionForceCrash", serde_json::json!("False")),
+            ("DFFlagHangDetectionForceCrash", serde_json::json!("False")),
+            ("FFlagHangDetection", serde_json::json!("False")),
+            ("DFFlagHangDetection", serde_json::json!("False")),
+            ("FFlagHangDetectionJob", serde_json::json!("False")),
+            ("DFFlagHangDetectionJob", serde_json::json!("False")),
+            ("FFlagHangDetectionJobCrossPlatform", serde_json::json!("False")),
+            ("DFFlagHangDetectionJobCrossPlatform", serde_json::json!("False")),
+            ("DFIntHangDetectionJobV2TimeoutMs", serde_json::json!(600000)),
         ];
 
         for (k, v) in compat_flags {

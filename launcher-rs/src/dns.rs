@@ -125,31 +125,7 @@ async fn handle_query(
 
     let lower_qname = qname.to_lowercase();
 
-    // Direct routing for core Roblox API, authentication, and GameJoin endpoints:
-    // Route to Roblox official edge Anycast load balancers immediately (<0.1ms).
-    // Prevents TSPU DNS blocking in Russia, eliminating "Could not resolve host: gamejoin.roblox.com"
-    // and allowing the green "Play" button in Roblox client to join games instantly!
-    if lower_qname == "gamejoin.roblox.com"
-        || lower_qname == "games.roblox.com"
-        || lower_qname == "assetgame.roblox.com"
-        || lower_qname == "apis.roblox.com"
-        || lower_qname == "api.roblox.com"
-        || lower_qname == "auth.roblox.com"
-        || lower_qname == "users.roblox.com"
-        || lower_qname == "avatar.roblox.com"
-        || lower_qname == "roblox.com"
-        || lower_qname == "www.roblox.com"
-    {
-        let resp = if qtype == 1 {
-            make_a_response(&query, &["128.116.13.3", "128.116.5.3", "128.116.44.3"])
-        } else {
-            make_empty_response(&query)
-        };
-        let _ = socket.send_to(&resp, peer).await;
-        return;
-    }
-
-    // Direct routing for clientsettingscdn.roblox.com: instant response with CloudFront CDN IPs
+    // 1. Direct routing for clientsettingscdn.roblox.com: instant response with CloudFront CDN IPs
     // Eliminates 30-40s delay during flag/version check on startup
     if lower_qname == "clientsettingscdn.roblox.com" {
         if qtype == 1 {
@@ -163,7 +139,7 @@ async fn handle_query(
         }
     }
 
-    // Direct routing for tr.rbxcdn.com (thumbnails/assets)
+    // 2. Direct routing for tr.rbxcdn.com (thumbnails/assets)
     // Return fast CloudFront CDN IPs immediately (<0.1ms) without blocking on recursive resolution
     if lower_qname == "tr.rbxcdn.com" {
         if qtype == 1 {
@@ -189,7 +165,32 @@ async fn handle_query(
         }
     }
 
-    // Dynamic regional probe domains: e.g. syd1-128-116-51-3.roblox.com -> 128.116.51.3
+    // 3. Fastly probe, blocked analytics beacons, and latency measurement probes:
+    // Return 127.0.0.1 so the probe immediately fails in 0ms without stalling libcurl connection pools on 30-100s timeouts
+    // which triggers RBXCRASH-HangDetected watchdog kills.
+    if lower_qname == "roblox-poc.global.ssl.fastly.net"
+        || lower_qname == "pulsar.roblox.com"
+        || lower_qname == "silver.roblox.com"
+        || lower_qname == "gold.roblox.com"
+        || lower_qname == "ecsv2.roblox.com"
+        || lower_qname == "metrics.roblox.com"
+        || lower_qname == "tracing.roblox.com"
+        || lower_qname == "client-telemetry.roblox.com"
+        || lower_qname == "optout.roblox.com"
+        || lower_qname == "diagnostics.roblox.com"
+        || lower_qname.starts_with("lms-")
+        || lower_qname.contains("lms-aws")
+    {
+        let resp = if qtype == 1 {
+            make_a_response(&query, &["127.0.0.1"])
+        } else {
+            make_empty_response(&query)
+        };
+        let _ = socket.send_to(&resp, peer).await;
+        return;
+    }
+
+    // 4. Dynamic regional probe domains: e.g. syd1-128-116-51-3.roblox.com -> 128.116.51.3
     if lower_qname.ends_with(".roblox.com") {
         if let Some(prefix) = lower_qname.strip_suffix(".roblox.com") {
             let parts: Vec<&str> = prefix.split('-').collect();
@@ -214,18 +215,12 @@ async fn handle_query(
         }
     }
 
-    // Fastly probe and blocked analytics beacons: return 127.0.0.1 so the probe immediately fails in 0ms
-    // without stalling libcurl connection pools on 30-50s timeouts.
-    if lower_qname == "roblox-poc.global.ssl.fastly.net"
-        || lower_qname == "pulsar.roblox.com"
-        || lower_qname == "silver.roblox.com"
-        || lower_qname == "gold.roblox.com"
-        || lower_qname == "ecsv2.roblox.com"
-        || lower_qname == "metrics.roblox.com"
-        || lower_qname == "tracing.roblox.com"
-    {
+    // 5. Direct routing for ALL core Roblox API, authentication, presence, friends, avatar, gamejoin, and economy endpoints:
+    // Route to Roblox official edge Anycast load balancers immediately (<0.1ms).
+    // Prevents TSPU DNS blocking in Russia, eliminating 100-second timeouts that cause RBXCRASH-HangDetected!
+    if lower_qname.ends_with(".roblox.com") || lower_qname == "roblox.com" {
         let resp = if qtype == 1 {
-            make_a_response(&query, &["127.0.0.1"])
+            make_a_response(&query, &["128.116.13.3", "128.116.5.3", "128.116.44.3"])
         } else {
             make_empty_response(&query)
         };
@@ -674,6 +669,35 @@ mod tests {
         let cdn_sanitized = sanitize_response(&cf_resp, "c3.rbxcdn.com");
         assert!(!cdn_sanitized.windows(4).any(|w| w == [128, 116, 5, 3]));
         assert!(cdn_sanitized.windows(4).any(|w| w == [104, 18, 2, 63]));
+    }
+
+    #[tokio::test]
+    async fn test_direct_routing_roblox_domains() {
+        let forwarder = DnsForwarder::start().await.expect("Failed to start forwarder");
+        let client_sock = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let target = format!("127.0.0.1:{}", forwarder.port);
+
+        // Query for friends.roblox.com
+        let query = [
+            0xfe, 0xed, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x07, b'f', b'r', b'i', b'e', b'n', b'd', b's',
+            0x06, b'r', b'o', b'b', b'l', b'o', b'x',
+            0x03, b'c', b'o', b'm', 0x00,
+            0x00, 0x01, 0x00, 0x01,
+        ];
+        client_sock.send_to(&query, &target).await.unwrap();
+
+        let mut buf = [0u8; 512];
+        let (len, _) = tokio::time::timeout(Duration::from_millis(500), client_sock.recv_from(&mut buf))
+            .await
+            .expect("Timed out")
+            .expect("Recv failed");
+
+        assert_eq!(&buf[..2], &[0xfe, 0xed]);
+        // Should contain Roblox edge IP 128.116.13.3
+        assert!(buf[..len].windows(4).any(|w| w == [128, 116, 13, 3]));
+
+        forwarder.stop();
     }
 }
 

@@ -22,7 +22,7 @@ for kv in "$@"; do
     else
         export "$kv"
     fi
-done
+ulimit -n 65536 2>/dev/null || true
 cd "$app_dir" || exit 1
 export DYLD_FORCE_FLAT_NAMESPACE=1
 export DYLD_INSERT_LIBRARIES="$shim_dir/libMacOBloxShims.dylib"
