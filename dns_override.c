@@ -208,7 +208,7 @@ static int query_forwarder(const char *node, unsigned int *addresses) {
             if (send(fd, query, (size_t)length, 0) != length)
                 break;
             struct darwin_pollfd wait = {fd, 1, 0};
-            if (poll(&wait, 1, 300) <= 0)
+            if (poll(&wait, 1, 800) <= 0)
                 continue;
             unsigned char reply[1500];
             ssize_t got = recv(fd, reply, sizeof reply, 0);
@@ -256,6 +256,64 @@ struct macoblox_ai_block {
     struct darwin_sockaddr_in address;
 };
 
+static int is_roblox_com_domain(const char *node) {
+    if (!node) return 0;
+    size_t len = 0;
+    while (node[len]) len++;
+    const char suffix[] = "roblox.com";
+    size_t sfx_len = sizeof(suffix) - 1;
+    if (len < sfx_len) return 0;
+    if (len > sfx_len && node[len - sfx_len - 1] != '.') return 0;
+    const char *p = node + (len - sfx_len);
+    for (size_t i = 0; i < sfx_len; i++) {
+        char c1 = (p[i] >= 'A' && p[i] <= 'Z') ? (p[i] + 32) : p[i];
+        if (c1 != suffix[i]) return 0;
+    }
+    return 1;
+}
+
+static int try_parse_roblox_probe_ip(const char *node, unsigned int *out_ip) {
+    if (!is_roblox_com_domain(node)) return 0;
+    size_t len = 0;
+    while (node[len]) len++;
+    if (len < 12) return 0;
+    size_t prefix_len = len - 11; /* length before .roblox.com */
+    int o[4] = {-1, -1, -1, -1};
+    int octet_idx = 3;
+    int curr = 0;
+    int mult = 1;
+    int digits = 0;
+    for (ssize_t i = (ssize_t)prefix_len - 1; i >= 0 && octet_idx >= 0; i--) {
+        char c = node[i];
+        if (c >= '0' && c <= '9') {
+            curr += (c - '0') * mult;
+            mult *= 10;
+            digits++;
+            if (curr > 255 || digits > 3) return 0;
+        } else if (c == '-') {
+            if (digits == 0) return 0;
+            o[octet_idx--] = curr;
+            curr = 0;
+            mult = 1;
+            digits = 0;
+        } else {
+            if (octet_idx == 0 && digits > 0) {
+                o[octet_idx--] = curr;
+            }
+            break;
+        }
+    }
+    if (octet_idx == 0 && digits > 0) {
+        o[0] = curr;
+        octet_idx--;
+    }
+    if (octet_idx < 0 && o[0] >= 0 && o[1] >= 0 && o[2] >= 0 && o[3] >= 0) {
+        *out_ip = (unsigned int)o[0] | ((unsigned int)o[1] << 8) | ((unsigned int)o[2] << 16) | ((unsigned int)o[3] << 24);
+        return 1;
+    }
+    return 0;
+}
+
 /* 0 on success with *result set, an EAI error, or -1 to use the system resolver. */
 int macoblox_dns_resolve(const char *node, const char *service, const void *hints_pointer,
                          void **result) {
@@ -276,10 +334,25 @@ int macoblox_dns_resolve(const char *node, const char *service, const void *hint
 
     unsigned int addresses[MAX_ADDRESSES];
     int count = query_forwarder(node, addresses);
-    if (count == -2)
-        return EAI_NONAME_DARWIN;
-    if (count <= 0)
-        return -1;
+    if (count <= 0 || count == -2) {
+        if (is_roblox_com_domain(node)) {
+            unsigned int probe_ip = 0;
+            if (try_parse_roblox_probe_ip(node, &probe_ip)) {
+                addresses[0] = probe_ip;
+                count = 1;
+            } else {
+                /* Roblox Anycast edge IPs */
+                addresses[0] = 128 | (116 << 8) | (13 << 16) | (3 << 24); /* 128.116.13.3 */
+                addresses[1] = 128 | (116 << 8) | (5 << 16) | (3 << 24);  /* 128.116.5.3 */
+                addresses[2] = 128 | (116 << 8) | (44 << 16) | (3 << 24); /* 128.116.44.3 */
+                count = 3;
+            }
+        } else if (count == -2) {
+            return EAI_NONAME_DARWIN;
+        } else {
+            return -1;
+        }
+    }
 
     int socktypes[2] = {1 /* STREAM */, 2 /* DGRAM */};
     int protocols[2] = {6, 17};

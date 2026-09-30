@@ -3462,6 +3462,28 @@ static id hooked_web_view_load_request(id self, SEL cmd, id request) {
 }
 static MacOBloxBool (*orig_workspace_open_url)(id, SEL, id) = 0;
 static MacOBloxBool hooked_workspace_open_url(id self, SEL cmd, id url) {
+    if (url) {
+        id url_str_obj = ((id (*)(id, SEL))objc_msgSend)(url, sel_registerName("absoluteString"));
+        const char *url_str = url_str_obj ? ((const char *(*)(id, SEL))objc_msgSend)(url_str_obj, sel_registerName("UTF8String")) : 0;
+        if (url_str && (strstr(url_str, "roblox:") == url_str || strstr(url_str, "roblox-player:") == url_str)) {
+            write_str("[MacOBlox] Intercepted roblox URL in NSWorkspace openURL: ");
+            write_str(url_str);
+            write_str("\n");
+            Class app_cls = objc_getClass("NSApplication");
+            id app = ((id (*)(id, SEL))objc_msgSend)(app_cls, sel_registerName("sharedApplication"));
+            id app_delegate = app ? ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("delegate")) : 0;
+            if (app_delegate) {
+                SEL open_urls_sel = sel_registerName("application:openURLs:");
+                if (((signed char (*)(id, SEL, SEL))objc_msgSend)(app_delegate, sel_registerName("respondsToSelector:"), open_urls_sel)) {
+                    Class arr_cls = objc_getClass("NSArray");
+                    id urls_array = ((id (*)(id, SEL, id))objc_msgSend)(arr_cls, sel_registerName("arrayWithObject:"), url);
+                    ((void (*)(id, SEL, id, id))objc_msgSend)(app_delegate, open_urls_sel, app, urls_array);
+                    write_str("[MacOBlox] Forwarded roblox URL directly to application:openURLs:\n");
+                    return 1;
+                }
+            }
+        }
+    }
     MacOBloxBool result = orig_workspace_open_url(self, cmd, url);
     macoblox_log_url(result ? "[MacOBlox Web] NSWorkspace openURL: (ok) "
                             : "[MacOBlox Web] NSWorkspace openURL: (failed) ", url);

@@ -123,11 +123,25 @@ async fn handle_query(
 ) {
     let (qname, qtype) = extract_qname_and_type(&query);
 
-    // Direct routing for auth.roblox.com: route to Roblox edge gateway (128.116.5.3 / 128.116.44.3)
-    // Cloudflare IPs (104.18.2.63) are throttled/blocked by TSPU in Russia causing 4+ second timeouts
-    if qname == "auth.roblox.com" {
+    let lower_qname = qname.to_lowercase();
+
+    // Direct routing for core Roblox API, authentication, and GameJoin endpoints:
+    // Route to Roblox official edge Anycast load balancers immediately (<0.1ms).
+    // Prevents TSPU DNS blocking in Russia, eliminating "Could not resolve host: gamejoin.roblox.com"
+    // and allowing the green "Play" button in Roblox client to join games instantly!
+    if lower_qname == "gamejoin.roblox.com"
+        || lower_qname == "games.roblox.com"
+        || lower_qname == "assetgame.roblox.com"
+        || lower_qname == "apis.roblox.com"
+        || lower_qname == "api.roblox.com"
+        || lower_qname == "auth.roblox.com"
+        || lower_qname == "users.roblox.com"
+        || lower_qname == "avatar.roblox.com"
+        || lower_qname == "roblox.com"
+        || lower_qname == "www.roblox.com"
+    {
         let resp = if qtype == 1 {
-            make_a_response(&query, &["128.116.5.3", "128.116.44.3"])
+            make_a_response(&query, &["128.116.13.3", "128.116.5.3", "128.116.44.3"])
         } else {
             make_empty_response(&query)
         };
@@ -137,7 +151,7 @@ async fn handle_query(
 
     // Direct routing for clientsettingscdn.roblox.com: instant response with CloudFront CDN IPs
     // Eliminates 30-40s delay during flag/version check on startup
-    if qname == "clientsettingscdn.roblox.com" {
+    if lower_qname == "clientsettingscdn.roblox.com" {
         if qtype == 1 {
             let resp = make_a_response(&query, &PRECACHED_CLIENTSETTINGS_IPS);
             let _ = socket.send_to(&resp, peer).await;
@@ -151,7 +165,7 @@ async fn handle_query(
 
     // Direct routing for tr.rbxcdn.com (thumbnails/assets)
     // Return fast CloudFront CDN IPs immediately (<0.1ms) without blocking on recursive resolution
-    if qname == "tr.rbxcdn.com" {
+    if lower_qname == "tr.rbxcdn.com" {
         if qtype == 1 {
             let resp = make_a_response(
                 &query,
@@ -175,12 +189,40 @@ async fn handle_query(
         }
     }
 
+    // Dynamic regional probe domains: e.g. syd1-128-116-51-3.roblox.com -> 128.116.51.3
+    if lower_qname.ends_with(".roblox.com") {
+        if let Some(prefix) = lower_qname.strip_suffix(".roblox.com") {
+            let parts: Vec<&str> = prefix.split('-').collect();
+            if parts.len() >= 4 {
+                let last4 = &parts[parts.len() - 4..];
+                if let (Ok(o1), Ok(o2), Ok(o3), Ok(o4)) = (
+                    last4[0].parse::<u8>(),
+                    last4[1].parse::<u8>(),
+                    last4[2].parse::<u8>(),
+                    last4[3].parse::<u8>(),
+                ) {
+                    let ip_str = format!("{o1}.{o2}.{o3}.{o4}");
+                    let resp = if qtype == 1 {
+                        make_a_response(&query, &[&ip_str])
+                    } else {
+                        make_empty_response(&query)
+                    };
+                    let _ = socket.send_to(&resp, peer).await;
+                    return;
+                }
+            }
+        }
+    }
+
     // Fastly probe and blocked analytics beacons: return 127.0.0.1 so the probe immediately fails in 0ms
-    // without stalling libcurl connection pools on 5-second timeouts.
-    if qname == "roblox-poc.global.ssl.fastly.net"
-        || qname == "pulsar.roblox.com"
-        || qname == "silver.roblox.com"
-        || qname == "ecsv2.roblox.com"
+    // without stalling libcurl connection pools on 30-50s timeouts.
+    if lower_qname == "roblox-poc.global.ssl.fastly.net"
+        || lower_qname == "pulsar.roblox.com"
+        || lower_qname == "silver.roblox.com"
+        || lower_qname == "gold.roblox.com"
+        || lower_qname == "ecsv2.roblox.com"
+        || lower_qname == "metrics.roblox.com"
+        || lower_qname == "tracing.roblox.com"
     {
         let resp = if qtype == 1 {
             make_a_response(&query, &["127.0.0.1"])
