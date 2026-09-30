@@ -57,9 +57,9 @@ static int macoblox_pthread_mutex_lock(void *mutex) {
             return result;
     }
 
-    /* 3. Microsecond naps (~50 ms total) before falling back to darlingserver psynch wait */
-    for (int attempt = 0; attempt < 1000; attempt++) {
-        usleep(50);
+    /* 3. Short backoff naps (max ~10 ms total) before falling back to darlingserver psynch wait */
+    for (int attempt = 0; attempt < 64; attempt++) {
+        usleep(attempt < 16 ? 50 : 150);
         result = pthread_mutex_trylock(mutex);
         if (result != DARWIN_EBUSY)
             return result;

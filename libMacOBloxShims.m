@@ -2589,6 +2589,8 @@ static volatile long macoblox_associate_mouse_count;
 static MacOBloxPoint macoblox_lock_anchor;
 static volatile int macoblox_lock_anchor_pending;
 
+static unsigned long long macoblox_last_warp_time;
+
 // Move the pointer by (dx, dy) window points (Cocoa axes, y up).
 static void macoblox_warp_pointer_by(double dx, double dy) {
     static int (*warp)(void*, unsigned long, unsigned long, int, int,
@@ -2609,13 +2611,20 @@ static void macoblox_warp_pointer_by(double dx, double dy) {
     int iy = (int)(dy < 0 ? dy - 0.5 : dy + 0.5);
     if (!warp || !display || (!ix && !iy))
         return;
+
+    // Cooldown: prevent back-to-back warps before previous warp finishes
+    unsigned long long now = mach_absolute_time();
+    if (macoblox_drop_warp_motion > 0 && (now - macoblox_last_warp_time) < 40000000ULL /* 40ms */)
+        return;
+
     // X11 y grows downward.
     warp(display, 0, 0, 0, 0, 0, 0, ix, -iy);
     if (flush)
         flush(display);
     macoblox_expected_warp_delta.x = ix;
     macoblox_expected_warp_delta.y = iy;
-    macoblox_drop_warp_motion = 1;
+    macoblox_drop_warp_motion = 5; // Look at up to 5 events before giving up
+    macoblox_last_warp_time = now;
 }
 
 static MacOBloxPoint macoblox_window_center(id window) {
@@ -2845,15 +2854,18 @@ static int macoblox_filter_locked_motion(id event) {
 }
 
 static int macoblox_filter_locked_motion_inner(id event, double dx, double dy) {
-    if (macoblox_drop_warp_motion) {
+    if (macoblox_drop_warp_motion > 0) {
+        macoblox_drop_warp_motion--;
         double ex = macoblox_expected_warp_delta.x, ey = macoblox_expected_warp_delta.y;
-        if ((dx - ex) * (dx - ex) + (dy - ey) * (dy - ey) <
-            0.25 * (ex * ex + ey * ey) + 4.0) {
+        double diff_sq = (dx - ex) * (dx - ex) + (dy - ey) * (dy - ey);
+        double ex_sq = ex * ex + ey * ey;
+        if (diff_sq < 0.35 * ex_sq + 25.0 ||
+            (ex != 0 && (dx * ex > 0) && __builtin_fabs(dx) >= __builtin_fabs(ex) * 0.4 && __builtin_fabs(dx) > 15.0)) {
             macoblox_drop_warp_motion = 0;
             return 1;
         }
     }
-    if (!macoblox_drop_warp_motion) {
+    if (macoblox_drop_warp_motion == 0) {
         MacOBloxPoint location = macoblox_real_event_location(event);
         double ox = location.x - macoblox_lock_anchor.x, oy = location.y - macoblox_lock_anchor.y;
         if (macoblox_lock_anchor_pending) {
@@ -2901,8 +2913,11 @@ static int macoblox_is_motion_type(id event) {
 static double (*orig_mouse_event_delta_x)(id, SEL) = 0;
 static double hooked_mouse_event_delta_x(id self, SEL cmd) {
     double delta = orig_mouse_event_delta_x(self, cmd);
-    if (macoblox_pointer_grabbed && macoblox_is_motion_type(self))
+    if (macoblox_pointer_grabbed && macoblox_is_motion_type(self)) {
+        if (delta > 60.0) delta = 60.0;
+        else if (delta < -60.0) delta = -60.0;
         return delta * macoblox_mouse_sensitivity();
+    }
     return delta;
 }
 static double (*orig_mouse_event_delta_y)(id, SEL) = 0;
@@ -2911,7 +2926,12 @@ static double hooked_mouse_event_delta_y(id self, SEL cmd) {
     if (!macoblox_is_motion_type(self))
         return delta;
     delta = -delta;
-    return macoblox_pointer_grabbed ? delta * macoblox_mouse_sensitivity() : delta;
+    if (macoblox_pointer_grabbed) {
+        if (delta > 60.0) delta = 60.0;
+        else if (delta < -60.0) delta = -60.0;
+        return delta * macoblox_mouse_sensitivity();
+    }
+    return delta;
 }
 
 // Scroll wheel APIs missing from Darling's NSEvent. X11 wheels report coarse
@@ -3330,11 +3350,14 @@ static void hooked_app_send_event(id self, SEL cmd, id event) {
         for (int index = 0; index < MACOBLOX_MAX_MONITORS; index++) {
             if (macoblox_monitors[index].block &&
                 (macoblox_monitors[index].mask & event_mask))
-                handlers[handler_count++] = macoblox_monitors[index].block;
+                handlers[handler_count++] = (struct MacOBloxBlock*)_Block_copy(macoblox_monitors[index].block);
         }
         macoblox_monitor_lock = 0;
-        for (int index = 0; index < handler_count && event; index++)
-            event = handlers[index]->invoke(handlers[index], event);
+        for (int index = 0; index < handler_count; index++) {
+            if (event)
+                event = handlers[index]->invoke(handlers[index], event);
+            _Block_release(handlers[index]);
+        }
         if (!event)
             return;
     }
@@ -4430,11 +4453,10 @@ static void macoblox_remember_cookie(id cookie, int deleted) {
 
     if ((deleted && !is_security) || (!persistent && !is_security)) {
         MSG1(void, macoblox_saved_cookies, "removeObjectForKey:", key);
-    } else {
         id entry = MSG0(id, objc_getClass("NSMutableDictionary"), "dictionary");
-        MSG2(void, entry, "setObject:forKey:", name, macoblox_nsstring("Name"));
+        if (name) MSG2(void, entry, "setObject:forKey:", name, macoblox_nsstring("Name"));
         MSG2(void, entry, "setObject:forKey:", val ? val : macoblox_nsstring(""), macoblox_nsstring("Value"));
-        MSG2(void, entry, "setObject:forKey:", domain, macoblox_nsstring("Domain"));
+        if (domain) MSG2(void, entry, "setObject:forKey:", domain, macoblox_nsstring("Domain"));
         MSG2(void, entry, "setObject:forKey:", path ? path : macoblox_nsstring("/"), macoblox_nsstring("Path"));
         MSG2(void, entry, "setObject:forKey:", expires ? expires : now, macoblox_nsstring("Expires"));
         id properties = MSG0(id, cookie, "properties");
@@ -4442,7 +4464,8 @@ static void macoblox_remember_cookie(id cookie, int deleted) {
         int is_secure = secure && ((MacOBloxBool (*)(id, SEL, SEL))objc_msgSend)(secure, sel_registerName("respondsToSelector:"), sel_registerName("boolValue"))
             && MSG0(MacOBloxBool, secure, "boolValue");
         MSG2(void, entry, "setObject:forKey:", macoblox_cf_boolean(is_secure), macoblox_nsstring("Secure"));
-        MSG2(void, macoblox_saved_cookies, "setObject:forKey:", entry, key);
+        if (key && name && domain)
+            MSG2(void, macoblox_saved_cookies, "setObject:forKey:", entry, key);
     }
     macoblox_write_saved_cookies_locked();
     macoblox_spin_unlock(&macoblox_cookie_lock);

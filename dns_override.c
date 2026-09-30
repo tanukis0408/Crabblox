@@ -249,21 +249,12 @@ static int query_forwarder(const char *node, unsigned int *addresses) {
     return found;
 }
 
-/* Lists built here, so freeaddrinfo can tell them apart. */
-static void *volatile owned_lists[256];
-
-static void remember(void *list) {
-    for (int i = 0; i < 256; i++)
-        if (__sync_bool_compare_and_swap(&owned_lists[i], (void *)0, list))
-            return;
-}
-
-static int forget(void *list) {
-    for (int i = 0; i < 256; i++)
-        if (owned_lists[i] == list && __sync_bool_compare_and_swap(&owned_lists[i], list, (void *)0))
-            return 1;
-    return 0;
-}
+#define MACOBLOX_AI_MAGIC 0x4D4F4258 /* 'MOBX' */
+struct macoblox_ai_block {
+    unsigned int magic;
+    struct darwin_addrinfo entry;
+    struct darwin_sockaddr_in address;
+};
 
 /* 0 on success with *result set, an EAI error, or -1 to use the system resolver. */
 int macoblox_dns_resolve(const char *node, const char *service, const void *hints_pointer,
@@ -301,39 +292,43 @@ int macoblox_dns_resolve(const char *node, const char *service, const void *hint
     struct darwin_addrinfo *head = 0, *tail = 0;
     for (int i = 0; i < count; i++) {
         for (int kind = 0; kind < kinds; kind++) {
-            struct darwin_addrinfo *entry = calloc(1, sizeof *entry + sizeof(struct darwin_sockaddr_in));
-            if (!entry)
+            struct macoblox_ai_block *block = calloc(1, sizeof *block);
+            if (!block)
                 break;
-            struct darwin_sockaddr_in *address = (struct darwin_sockaddr_in *)(entry + 1);
-            address->len = sizeof *address;
-            address->family = AF_INET_DARWIN;
-            address->port = port;
-            address->address = addresses[i];
-            entry->family = AF_INET_DARWIN;
-            entry->socktype = socktypes[kind];
-            entry->protocol = protocols[kind];
-            entry->addrlen = sizeof *address;
-            entry->addr = address;
-            if (tail) tail->next = entry; else head = entry;
-            tail = entry;
+            block->magic = MACOBLOX_AI_MAGIC;
+            block->address.len = sizeof block->address;
+            block->address.family = AF_INET_DARWIN;
+            block->address.port = port;
+            block->address.address = addresses[i];
+            block->entry.family = AF_INET_DARWIN;
+            block->entry.socktype = socktypes[kind];
+            block->entry.protocol = protocols[kind];
+            block->entry.addrlen = sizeof block->address;
+            block->entry.addr = &block->address;
+            if (tail) tail->next = &block->entry; else head = &block->entry;
+            tail = &block->entry;
         }
     }
     if (!head)
         return -1;
-    remember(head);
     *result = head;
     return 0;
 }
 
 static void macoblox_freeaddrinfo(void *list) {
-    if (list && forget(list)) {
-        struct darwin_addrinfo *entry = list;
-        while (entry) {
-            struct darwin_addrinfo *next = entry->next;
-            free(entry); /* sockaddr lives in the same allocation */
-            entry = next;
+    if (list) {
+        struct macoblox_ai_block *first = (struct macoblox_ai_block *)((char *)list - __builtin_offsetof(struct macoblox_ai_block, entry));
+        if (first->magic == MACOBLOX_AI_MAGIC) {
+            struct darwin_addrinfo *entry = list;
+            while (entry) {
+                struct darwin_addrinfo *next = entry->next;
+                struct macoblox_ai_block *block = (struct macoblox_ai_block *)((char *)entry - __builtin_offsetof(struct macoblox_ai_block, entry));
+                block->magic = 0;
+                free(block);
+                entry = next;
+            }
+            return;
         }
-        return;
     }
     freeaddrinfo(list);
 }

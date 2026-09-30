@@ -475,7 +475,7 @@ extern long write(int, const void *, unsigned long);
 extern int close(int);
 extern int *__error(void);
 extern int pthread_sigmask(int, const unsigned int *, unsigned int *);
-#define FIFO_AHEAD_FRAMES 2048
+#define FIFO_AHEAD_FRAMES 4096
 
 static void *unit_fifo_thread(void *context) {
     OutputUnit *unit = context;

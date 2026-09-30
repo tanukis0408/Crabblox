@@ -107,28 +107,27 @@ impl HostAudio {
 
         use std::os::unix::io::AsRawFd;
         unsafe {
-            // Buffer size ~128KB (~370ms headroom) prevents audio stuttering and clicks
-            // during heavy scene loads while audio_hal paces latency to ~46ms.
-            let _ = libc::fcntl(keep_file.as_raw_fd(), libc::F_SETPIPE_SZ, 131072);
+            // Buffer size ~64KB (~185ms headroom) prevents underruns while keeping latency low
+            let _ = libc::fcntl(keep_file.as_raw_fd(), libc::F_SETPIPE_SZ, 65536);
         }
 
         let mut cmd = Command::new(player_bin);
         if is_pipewire {
             cmd.args([
                 "--playback", "--raw", "--format", "f32", "--rate", "44100",
-                "--channels", "2", "--latency", "50ms", "--media-role", "Game",
-                "-P", "{ application.name = \"Roblox\" application.process.binary = \"crabblox\" media.name = \"Roblox (Crabblox)\" node.name = \"Roblox\" node.latency = 256/44100 }",
+                "--channels", "2", "--latency", "40ms", "--media-role", "Game",
+                "-P", "{ application.name = \"Roblox\" application.process.binary = \"crabblox\" media.name = \"Roblox (Crabblox)\" node.name = \"Roblox\" node.latency = 1024/44100 }",
                 fifo_path.to_str()?,
             ]);
-            cmd.env("PIPEWIRE_LATENCY", "256/44100");
+            cmd.env("PIPEWIRE_LATENCY", "1024/44100");
         } else {
             cmd.args([
                 "--playback", "--raw", "--format=float32le", "--rate=44100",
-                "--channels=2", "--latency-msec=50", "--client-name=Roblox",
+                "--channels=2", "--latency-msec=40", "--client-name=Roblox",
                 "--stream-name=Roblox (Crabblox)", "--property=media.role=game",
                 fifo_path.to_str()?,
             ]);
-            cmd.env("PULSE_LATENCY_MSEC", "50");
+            cmd.env("PULSE_LATENCY_MSEC", "40");
         }
 
         let player = cmd
@@ -204,6 +203,10 @@ impl Drop for RobloxSession {
         if let Some(ref r) = self.rpc {
             r.stop();
         }
+        self.dns.stop();
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        stop_roblox();
         if !self.diagnostics_performed {
             if let Ok(Some(status)) = self.child.try_wait() {
                 if !status.success() {
@@ -388,6 +391,8 @@ pub fn detect_gpu_environment() -> GpuEnvironment {
     if is_amd {
         env_vars.push(("RADV_PERFTEST".into(), "aco".into()));
         env_vars.push(("AMD_VULKAN_ICD".into(), "RADV".into()));
+        env_vars.push(("mesa_glthread".into(), "true".into()));
+        env_vars.push(("MESA_LOADER_DRIVER_OVERRIDE".into(), "radeonsi".into()));
         if is_hybrid && !is_nvidia {
             env_vars.push(("DRI_PRIME".into(), "1".into()));
         }
@@ -395,14 +400,22 @@ pub fn detect_gpu_environment() -> GpuEnvironment {
 
     if is_intel {
         env_vars.push(("MESA_LOADER_DRIVER_OVERRIDE".into(), "iris".into()));
+        env_vars.push(("mesa_glthread".into(), "true".into()));
     }
 
     // Modern Mesa performance flags: single-file disk cache prevents inode flooding & stutter,
-    // 2GB shader cache prevents eviction, and vblank_mode=0 allows true unlocked framerates.
+    // 2GB shader cache prevents eviction.
     env_vars.push(("MESA_DISK_CACHE_SINGLE_FILE".into(), "1".into()));
     env_vars.push(("MESA_GLSL_CACHE_MAX_SIZE".into(), "2G".into()));
     env_vars.push(("MESA_SHADER_CACHE_MAX_SIZE".into(), "2G".into()));
-    env_vars.push(("vblank_mode".into(), "0".into()));
+
+    // Under Wayland / Xwayland, forcing vblank_mode=0 thrashes compositor buffer presentation,
+    // causing extreme stutter and frame drops on 120Hz/144Hz displays. Only use on X11.
+    let is_wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
+        || std::env::var("XDG_SESSION_TYPE").map(|v| v.eq_ignore_ascii_case("wayland")).unwrap_or(false);
+    if !is_wayland {
+        env_vars.push(("vblank_mode".into(), "0".into()));
+    }
 
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let mvk_cache_dir = home.join(".cache/crabblox/vulkan_cache");
@@ -515,8 +528,15 @@ pub fn restart_darling(prefix: &std::path::Path) {
 pub fn roblox_pids() -> Vec<i32> {
     let mut pids = Vec::new();
     let my_pid = std::process::id() as i32;
+    let my_uid = unsafe { libc::getuid() };
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                use std::os::unix::fs::MetadataExt;
+                if meta.uid() != my_uid {
+                    continue;
+                }
+            }
             let name = entry.file_name();
             if let Ok(pid) = name.to_string_lossy().parse::<i32>() {
                 if pid == my_pid {
@@ -541,8 +561,15 @@ pub fn roblox_pids() -> Vec<i32> {
 pub fn all_roblox_pids() -> Vec<i32> {
     let mut pids = Vec::new();
     let my_pid = std::process::id() as i32;
+    let my_uid = unsafe { libc::getuid() };
     if let Ok(entries) = fs::read_dir("/proc") {
         for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                use std::os::unix::fs::MetadataExt;
+                if meta.uid() != my_uid {
+                    continue;
+                }
+            }
             let name = entry.file_name();
             if let Ok(pid) = name.to_string_lossy().parse::<i32>() {
                 if pid == my_pid {
@@ -724,6 +751,14 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         args.push(format!("MACOBLOX_AUDIO_FIFO=/Volumes/SystemRoot{}", a.fifo_path.display()));
     } else {
         args.push("MACOBLOX_AUDIO=0".into());
+    }
+
+    // Forward Xauthority so X11 and XFixes authenticate properly under Wayland
+    if let Ok(xauth) = std::env::var("XAUTHORITY") {
+        let trimmed = xauth.trim();
+        if !trimmed.is_empty() {
+            args.push(format!("XAUTHORITY=/Volumes/SystemRoot{}", trimmed));
+        }
     }
 
     // Pass deep link launch URL or place ID if provided
