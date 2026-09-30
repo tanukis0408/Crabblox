@@ -59,6 +59,7 @@ impl FastFlags {
     }
 
     pub fn clean_json_str(raw: &str) -> String {
+        let raw = raw.strip_prefix('\u{FEFF}').unwrap_or(raw);
         let mut out = String::with_capacity(raw.len());
         let mut in_string = false;
         let mut escaped = false;
@@ -82,6 +83,16 @@ impl FastFlags {
                     i += 2;
                     while i < chars.len() && chars[i] != '\n' && chars[i] != '\r' {
                         i += 1;
+                    }
+                } else if c == '/' && i + 1 < chars.len() && chars[i + 1] == '*' {
+                    i += 2;
+                    while i + 1 < chars.len() && !(chars[i] == '*' && chars[i + 1] == '/') {
+                        i += 1;
+                    }
+                    if i + 1 < chars.len() {
+                        i += 2;
+                    } else {
+                        i = chars.len();
                     }
                 } else if c == '"' {
                     in_string = true;
@@ -398,6 +409,25 @@ impl FastFlags {
             }
         }
 
+        let perf_defaults = [
+            ("FFlagFastGPULightCulling3", serde_json::json!("True")),
+            ("FIntMeshContentProviderCacheSizeTotalMb", serde_json::json!(512)),
+            ("FFlagPreloadAllFonts", serde_json::json!("True")),
+            ("DFIntTaskSchedulerTargetFps", serde_json::json!(240)),
+            ("DFIntCSGLevelOfDetailSwitchingDistance", serde_json::json!(500)),
+            ("DFIntCSGLevelOfDetailSwitchingDistanceL2", serde_json::json!(1000)),
+            ("FFlagDebugDisableTelemetry", serde_json::json!("True")),
+            ("FFlagDisableCrashReporting", serde_json::json!("True")),
+            ("FFlagEnableInGameMenuControls", serde_json::json!("True")),
+        ];
+
+        for (k, v) in perf_defaults {
+            if !flags.contains_key(k) {
+                flags.insert(k.to_string(), v);
+                changed = true;
+            }
+        }
+
         if changed {
             Self::save(paths, &flags)?;
         }
@@ -571,5 +601,16 @@ mod tests {
         assert_eq!(flags.get("DFFlagCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
         assert_eq!(flags.get("FFlagUnifiedCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
         assert_eq!(flags.get("DFFlagUnifiedCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
+        assert_eq!(flags.get("FFlagFastGPULightCulling3").and_then(|v| v.as_str()), Some("True"));
+        assert_eq!(flags.get("FIntMeshContentProviderCacheSizeTotalMb").and_then(|v| v.as_i64()), Some(512));
+        assert_eq!(flags.get("DFIntTaskSchedulerTargetFps").and_then(|v| v.as_i64()), Some(240));
+    }
+
+    #[test]
+    fn test_clean_json_str_with_block_comments() {
+        let dirty = "\u{FEFF}{\n/* block comment */\n\"flag\": true\n}";
+        let cleaned = FastFlags::clean_json_str(dirty);
+        let parsed: Value = serde_json::from_str(&cleaned).expect("Should parse");
+        assert_eq!(parsed["flag"], true);
     }
 }

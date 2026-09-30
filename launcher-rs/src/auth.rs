@@ -163,7 +163,23 @@ pub fn save_session_cookie(paths: &Paths, cookie: &str) -> anyhow::Result<String
         raw_cookie
     };
 
-    let user_info = validate_cookie(cookie_val)?;
+    let user_info = match validate_cookie(cookie_val) {
+        Ok(info) => info,
+        Err(e) => {
+            // If network validation failed (e.g. timeout or blocked Cloudflare IP in Russia),
+            // but the cookie is a genuine ROBLOSECURITY token, do NOT discard it!
+            if cookie_val.starts_with("_|WARNING:-DO-NOT-SHARE-THIS") || cookie_val.len() > 100 {
+                let cached_name = signed_in_user(paths).unwrap_or_else(|| "Roblox User".to_string());
+                UserInfo {
+                    id: 0,
+                    name: cached_name.clone(),
+                    display_name: Some(cached_name),
+                }
+            } else {
+                return Err(e);
+            }
+        }
+    };
     let username = user_info.display_name.clone().unwrap_or_else(|| user_info.name.clone());
 
     let _ = fs::create_dir_all(&paths.cache_dir);

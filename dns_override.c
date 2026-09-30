@@ -52,34 +52,56 @@ extern void freeaddrinfo(void *);
 #define MAX_ADDRESSES 16
 
 static int forwarder_port(unsigned int *address, unsigned short *port) {
-    const char *value = getenv("MACOBLOX_DNS");
-    if (!value || !value[0])
+    static int cached_ok = -1;
+    static unsigned int cached_addr = 0;
+    static unsigned short cached_port = 0;
+    if (cached_ok >= 0) {
+        if (cached_ok) {
+            *address = cached_addr;
+            *port = cached_port;
+            return 1;
+        }
         return 0;
+    }
+
+    const char *value = getenv("MACOBLOX_DNS");
+    if (!value || !value[0]) {
+        cached_ok = 0;
+        return 0;
+    }
     unsigned int parts[4] = {0, 0, 0, 0};
     int part = 0;
     unsigned int number = 0;
     const char *c = value;
     for (; *c && *c != ':'; c++) {
         if (*c == '.') {
-            if (part > 3) return 0;
+            if (part > 3) { cached_ok = 0; return 0; }
             parts[part++] = number;
             number = 0;
         } else if (*c >= '0' && *c <= '9') {
             number = number * 10 + (unsigned int)(*c - '0');
         } else {
+            cached_ok = 0;
             return 0;
         }
     }
-    if (part != 3 || *c != ':')
+    if (part != 3 || *c != ':') {
+        cached_ok = 0;
         return 0;
+    }
     parts[3] = number;
     number = 0;
     for (c++; *c >= '0' && *c <= '9'; c++)
         number = number * 10 + (unsigned int)(*c - '0');
-    if (!number || number > 65535)
+    if (!number || number > 65535) {
+        cached_ok = 0;
         return 0;
-    *address = parts[0] | parts[1] << 8 | parts[2] << 16 | parts[3] << 24; /* network order */
-    *port = (unsigned short)((number >> 8) | ((number & 255) << 8));
+    }
+    cached_addr = parts[0] | parts[1] << 8 | parts[2] << 16 | parts[3] << 24; /* network order */
+    cached_port = (unsigned short)((number >> 8) | ((number & 255) << 8));
+    cached_ok = 1;
+    *address = cached_addr;
+    *port = cached_port;
     return 1;
 }
 

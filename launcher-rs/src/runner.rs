@@ -105,9 +105,9 @@ impl HostAudio {
 
         use std::os::unix::io::AsRawFd;
         unsafe {
-            // Buffer size ~32KB (~93ms of 44.1kHz f32 stereo headroom)
-            // prevents audio latency lag (~740ms with 256KB) while allowing smooth playback
-            libc::fcntl(keep_file.as_raw_fd(), libc::F_SETPIPE_SZ, 32768);
+            // Buffer size ~128KB (~370ms headroom) prevents audio stuttering and clicks
+            // during heavy scene loads while audio_hal paces latency to ~46ms.
+            let _ = libc::fcntl(keep_file.as_raw_fd(), libc::F_SETPIPE_SZ, 131072);
         }
 
         let mut cmd = Command::new(player_bin);
@@ -333,6 +333,7 @@ pub fn raise_fd_limit() {
 pub struct GpuEnvironment {
     pub is_nvidia: bool,
     pub is_amd: bool,
+    pub is_intel: bool,
     pub is_hybrid: bool,
     pub env_vars: Vec<(String, String)>,
 }
@@ -340,6 +341,7 @@ pub struct GpuEnvironment {
 pub fn detect_gpu_environment() -> GpuEnvironment {
     let mut is_nvidia = false;
     let mut is_amd = false;
+    let mut is_intel = false;
     let mut drm_card_count = 0;
 
     if let Ok(entries) = fs::read_dir("/sys/class/drm") {
@@ -355,6 +357,9 @@ pub fn detect_gpu_environment() -> GpuEnvironment {
                     }
                     if uevent_lower.contains("driver=amdgpu") || uevent_lower.contains("driver=radeon") || uevent_lower.contains("vendor=0x1002") {
                         is_amd = true;
+                    }
+                    if uevent_lower.contains("driver=i915") || uevent_lower.contains("driver=xe") || uevent_lower.contains("vendor=0x8086") {
+                        is_intel = true;
                     }
                 }
             }
@@ -386,6 +391,20 @@ pub fn detect_gpu_environment() -> GpuEnvironment {
         }
     }
 
+    if is_intel {
+        env_vars.push(("MESA_LOADER_DRIVER_OVERRIDE".into(), "iris".into()));
+    }
+
+    // Modern Mesa performance flags: single-file disk cache prevents inode flooding & stutter,
+    // 2GB shader cache prevents eviction, vblank_mode=0 allows true unlocked framerates,
+    // and mesa_glthread enables multi-threaded driver dispatch.
+    env_vars.push(("MESA_DISK_CACHE_SINGLE_FILE".into(), "1".into()));
+    env_vars.push(("MESA_GLSL_CACHE_MAX_SIZE".into(), "2G".into()));
+    env_vars.push(("MESA_SHADER_CACHE_MAX_SIZE".into(), "2G".into()));
+    env_vars.push(("vblank_mode".into(), "0".into()));
+    env_vars.push(("mesa_glthread".into(), "true".into()));
+    env_vars.push(("MESA_NO_ERROR".into(), "1".into()));
+
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let mvk_cache_dir = home.join(".cache/crabblox/vulkan_cache");
     let _ = fs::create_dir_all(&mvk_cache_dir);
@@ -397,6 +416,7 @@ pub fn detect_gpu_environment() -> GpuEnvironment {
     GpuEnvironment {
         is_nvidia,
         is_amd,
+        is_intel,
         is_hybrid,
         env_vars,
     }
@@ -687,6 +707,8 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         println!("GPU: NVIDIA (PRIME offload & 1GB shader cache active)");
     } else if gpu_env.is_amd {
         println!("GPU: AMD (RADV ACO shader compiler active)");
+    } else if gpu_env.is_intel {
+        println!("GPU: Intel Iris (OpenGL 4.6, multithreaded GL, 2GB single-file shader cache active)");
     }
 
     let icon_file = paths.cache_dir.join("icon.argb");

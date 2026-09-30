@@ -475,7 +475,7 @@ extern long write(int, const void *, unsigned long);
 extern int close(int);
 extern int *__error(void);
 extern int pthread_sigmask(int, const unsigned int *, unsigned int *);
-#define FIFO_AHEAD_FRAMES 16384
+#define FIFO_AHEAD_FRAMES 2048
 
 static void *unit_fifo_thread(void *context) {
     OutputUnit *unit = context;
@@ -506,22 +506,25 @@ static void *unit_fifo_thread(void *context) {
             unsigned int sleep_us = (unsigned int)(((ahead - FIFO_AHEAD_FRAMES) / rate) * 1e6);
             if (sleep_us < 2000)
                 sleep_us = 2000;
-            else if (sleep_us > 15000)
-                sleep_us = 15000;
+            else if (sleep_us > 10000)
+                sleep_us = 10000;
             usleep(sleep_us);
             continue;
         }
-        if (ahead < -(rate * 1.0)) { /* fell far behind (> 1s stall): restart the clock */
+        if (ahead < -(rate * 0.5)) { /* fell behind by 0.5s: resync timestamp to prevent runaway */
             start = mach_absolute_time();
             frames_written = 0;
         }
         unit_render(unit, block, RENDER_FRAMES);
         unsigned long done = 0;
+        int retries = 0;
         while (done < chunk) {
             long written = write(fd, block + done, chunk - done);
             if (written <= 0) {
-                if (written == 0 || (written < 0 && (*__error() == 4 /* EINTR */ || *__error() == 35 /* EAGAIN */))) {
-                    usleep(1000);
+                int err = *__error();
+                if ((written == 0 || err == 4 /* EINTR */ || err == 35 /* EAGAIN */) && retries < 100) {
+                    retries++;
+                    usleep(500);
                     continue;
                 }
                 close(fd);
@@ -529,6 +532,7 @@ static void *unit_fifo_thread(void *context) {
                 break;
             }
             done += (unsigned long)written;
+            retries = 0;
         }
         frames_written += (done / (frame_bytes ? frame_bytes : 8));
     }

@@ -2162,14 +2162,31 @@ static MacOBloxRect window_convert_rect_to_screen(id self, SEL cmd, MacOBloxRect
 // Darling exposes a deliberately small WebPreferences forwarding stub, but
 // omits this legacy singleton constructor.  Roblox asks for the singleton while
 // creating its experience coordinator, before any preference setters are sent.
+static inline void macoblox_spin_lock(volatile int* lock) {
+    if (!__sync_lock_test_and_set(lock, 1))
+        return;
+    for (int backoff = 1; backoff <= 32; backoff++) {
+        for (int p = 0; p < backoff; p++) {
+            __builtin_ia32_pause();
+        }
+        if (!__sync_lock_test_and_set(lock, 1))
+            return;
+    }
+    while (__sync_lock_test_and_set(lock, 1)) {
+        usleep(50);
+    }
+}
+static inline void macoblox_spin_unlock(volatile int* lock) {
+    __sync_lock_release(lock);
+}
+
 static id macoblox_standard_web_preferences;
 static volatile int macoblox_web_preferences_lock;
 static id web_preferences_standard_preferences(id cls, SEL cmd) {
     (void)cmd;
     if (macoblox_standard_web_preferences)
         return macoblox_standard_web_preferences;
-    while (__sync_lock_test_and_set(&macoblox_web_preferences_lock, 1))
-        usleep(1000);
+    macoblox_spin_lock(&macoblox_web_preferences_lock);
     if (!macoblox_standard_web_preferences) {
         id preferences = ((id (*)(id, SEL))objc_msgSend)(
             cls, sel_registerName("alloc"));
@@ -2178,7 +2195,7 @@ static id web_preferences_standard_preferences(id cls, SEL cmd) {
             : 0;
         macoblox_standard_web_preferences = preferences;
     }
-    __sync_lock_release(&macoblox_web_preferences_lock);
+    macoblox_spin_unlock(&macoblox_web_preferences_lock);
     return macoblox_standard_web_preferences;
 }
 
@@ -2810,7 +2827,11 @@ static int macoblox_filter_locked_motion(id event) {
     if (!macoblox_pointer_grabbed)
         return 0;
     // Raw Darling deltas (Cocoa axes), without sign flip or sensitivity.
-    SEL delta_x = sel_registerName("deltaX"), delta_y = sel_registerName("deltaY");
+    static SEL delta_x = 0, delta_y = 0;
+    if (!delta_x) {
+        delta_x = sel_registerName("deltaX");
+        delta_y = sel_registerName("deltaY");
+    }
     double dx = orig_mouse_event_delta_x ? orig_mouse_event_delta_x(event, delta_x)
         : ((double (*)(id, SEL))objc_msgSend)(event, delta_x);
     double dy = orig_mouse_event_delta_y ? orig_mouse_event_delta_y(event, delta_y)
@@ -2871,8 +2892,10 @@ static double macoblox_mouse_sensitivity(void) {
     return value;
 }
 static int macoblox_is_motion_type(id event) {
+    static SEL s_type_sel = 0;
+    if (!s_type_sel) s_type_sel = sel_registerName("type");
     unsigned long type = ((unsigned long (*)(id, SEL))objc_msgSend)(
-        event, sel_registerName("type"));
+        event, s_type_sel);
     return type == 5 || type == 6 || type == 7 || type == 27;
 }
 static double (*orig_mouse_event_delta_x)(id, SEL) = 0;
@@ -3663,10 +3686,10 @@ static id hooked_pixel_format_init(id self, SEL cmd, const unsigned int* attribu
 // thread (shared_current_display), so all three take a lock.
 static volatile int macoblox_event_queue_lock;
 static void macoblox_lock_event_queue(void) {
-    while (__sync_lock_test_and_set(&macoblox_event_queue_lock, 1)) {}
+    macoblox_spin_lock(&macoblox_event_queue_lock);
 }
 static void macoblox_unlock_event_queue(void) {
-    __sync_lock_release(&macoblox_event_queue_lock);
+    macoblox_spin_unlock(&macoblox_event_queue_lock);
 }
 static id macoblox_event_queue(id display) {
     static Ivar queue_ivar;
@@ -3675,7 +3698,9 @@ static id macoblox_event_queue(id display) {
     return queue_ivar ? *(id*)((char*)display + ivar_getOffset(queue_ivar)) : (id)0;
 }
 static unsigned long macoblox_event_type(id event) {
-    return ((unsigned long (*)(id, SEL))objc_msgSend)(event, sel_registerName("type"));
+    static SEL s_type = 0;
+    if (!s_type) s_type = sel_registerName("type");
+    return ((unsigned long (*)(id, SEL))objc_msgSend)(event, s_type);
 }
 static int macoblox_mask_matches(unsigned long long mask, unsigned long type) {
     return type < 64 && (mask & (1ULL << type));
@@ -3685,41 +3710,57 @@ static id hooked_display_next_event(id self, SEL cmd, unsigned long long mask, i
                                     signed char dequeue) {
     (void)cmd;
     id queue = macoblox_event_queue(self);
-    SEL count = sel_registerName("count"), object_at = sel_registerName("objectAtIndex:");
-    if (queue && ((unsigned long (*)(id, SEL))objc_msgSend)(queue, count))
-        until = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSDate"), sel_registerName("date"));
-    id run_loop = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSRunLoop"),
-                                                  sel_registerName("currentRunLoop"));
-    ((signed char (*)(id, SEL, id, id))objc_msgSend)(run_loop, sel_registerName("runMode:beforeDate:"),
-                                                     mode, until);
+    static SEL s_count = 0, s_object_at = 0, s_date = 0, s_current_run_loop = 0,
+               s_run_mode = 0, s_retain = 0, s_remove_at = 0, s_autorelease = 0,
+               s_alloc = 0, s_init_event = 0;
+    static Class s_date_cls = 0, s_run_loop_cls = 0, s_event_cls = 0;
+    if (!s_count) {
+        s_count = sel_registerName("count");
+        s_object_at = sel_registerName("objectAtIndex:");
+        s_date = sel_registerName("date");
+        s_current_run_loop = sel_registerName("currentRunLoop");
+        s_run_mode = sel_registerName("runMode:beforeDate:");
+        s_retain = sel_registerName("retain");
+        s_remove_at = sel_registerName("removeObjectAtIndex:");
+        s_autorelease = sel_registerName("autorelease");
+        s_alloc = sel_registerName("alloc");
+        s_init_event = sel_registerName("initWithType:location:modifierFlags:window:");
+        s_date_cls = objc_getClass("NSDate");
+        s_run_loop_cls = objc_getClass("NSRunLoop");
+        s_event_cls = objc_getClass("NSEvent");
+    }
+
+    if (queue && ((unsigned long (*)(id, SEL))objc_msgSend)(queue, s_count))
+        until = ((id (*)(id, SEL))objc_msgSend)(s_date_cls, s_date);
+    id run_loop = ((id (*)(id, SEL))objc_msgSend)(s_run_loop_cls, s_current_run_loop);
+    ((signed char (*)(id, SEL, id, id))objc_msgSend)(run_loop, s_run_mode, mode, until);
     id result = (id)0;
     if (queue) {
         macoblox_lock_event_queue();
-        unsigned long total = ((unsigned long (*)(id, SEL))objc_msgSend)(queue, count);
+        unsigned long total = ((unsigned long (*)(id, SEL))objc_msgSend)(queue, s_count);
         for (unsigned long index = 0; index < total; index++) {
-            id event = ((id (*)(id, SEL, unsigned long))objc_msgSend)(queue, object_at, index);
+            id event = ((id (*)(id, SEL, unsigned long))objc_msgSend)(queue, s_object_at, index);
             if (!macoblox_mask_matches(mask, macoblox_event_type(event)))
                 continue;
-            result = ((id (*)(id, SEL))objc_msgSend)(event, sel_registerName("retain"));
+            result = ((id (*)(id, SEL))objc_msgSend)(event, s_retain);
             if (dequeue)
-                ((void (*)(id, SEL, unsigned long))objc_msgSend)(
-                    queue, sel_registerName("removeObjectAtIndex:"), index);
+                ((void (*)(id, SEL, unsigned long))objc_msgSend)(queue, s_remove_at, index);
             break;
         }
         /* Nobody may ever ask for some event types; keep the queue bounded. */
-        while (((unsigned long (*)(id, SEL))objc_msgSend)(queue, count) > 4096)
-            ((void (*)(id, SEL, unsigned long))objc_msgSend)(queue, sel_registerName("removeObjectAtIndex:"), 0);
+        while (((unsigned long (*)(id, SEL))objc_msgSend)(queue, s_count) > 4096)
+            ((void (*)(id, SEL, unsigned long))objc_msgSend)(queue, s_remove_at, 0);
         macoblox_unlock_event_queue();
         if (result)
-            result = ((id (*)(id, SEL))objc_msgSend)(result, sel_registerName("autorelease"));
+            result = ((id (*)(id, SEL))objc_msgSend)(result, s_autorelease);
     }
     if (!result) {
         /* As Darling: an NSAppKitSystem event when nothing matches. */
-        id event = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSEvent"), sel_registerName("alloc"));
+        id event = ((id (*)(id, SEL))objc_msgSend)(s_event_cls, s_alloc);
         event = ((id (*)(id, SEL, unsigned long, MacOBloxPoint, unsigned long, id))objc_msgSend)(
-            event, sel_registerName("initWithType:location:modifierFlags:window:"), 13 /* NSAppKitSystem */,
+            event, s_init_event, 13 /* NSAppKitSystem */,
             (MacOBloxPoint){0, 0}, 0, (id)0);
-        result = ((id (*)(id, SEL))objc_msgSend)(event, sel_registerName("autorelease"));
+        result = ((id (*)(id, SEL))objc_msgSend)(event, s_autorelease);
     }
     return result;
 }
@@ -3729,12 +3770,16 @@ static void hooked_display_post_event(id self, SEL cmd, id event, signed char at
     id queue = macoblox_event_queue(self);
     if (!queue || !event)
         return;
+    static SEL s_insert_at = 0, s_add_object = 0;
+    if (!s_insert_at) {
+        s_insert_at = sel_registerName("insertObject:atIndex:");
+        s_add_object = sel_registerName("addObject:");
+    }
     macoblox_lock_event_queue();
     if (at_start)
-        ((void (*)(id, SEL, id, unsigned long))objc_msgSend)(queue, sel_registerName("insertObject:atIndex:"),
-                                                             event, 0);
+        ((void (*)(id, SEL, id, unsigned long))objc_msgSend)(queue, s_insert_at, event, 0);
     else
-        ((void (*)(id, SEL, id))objc_msgSend)(queue, sel_registerName("addObject:"), event);
+        ((void (*)(id, SEL, id))objc_msgSend)(queue, s_add_object, event);
     macoblox_unlock_event_queue();
 }
 
@@ -3743,18 +3788,24 @@ static void hooked_display_discard_events(id self, SEL cmd, unsigned long long m
     id queue = macoblox_event_queue(self);
     if (!queue)
         return;
+    static SEL s_count = 0, s_object_at = 0, s_remove_at = 0;
+    if (!s_count) {
+        s_count = sel_registerName("count");
+        s_object_at = sel_registerName("objectAtIndex:");
+        s_remove_at = sel_registerName("removeObjectAtIndex:");
+    }
     macoblox_lock_event_queue();
-    unsigned long total = ((unsigned long (*)(id, SEL))objc_msgSend)(queue, sel_registerName("count"));
+    unsigned long total = ((unsigned long (*)(id, SEL))objc_msgSend)(queue, s_count);
     unsigned long stop = total;
     for (unsigned long index = 0; index < total; index++)
-        if (((id (*)(id, SEL, unsigned long))objc_msgSend)(queue, sel_registerName("objectAtIndex:"), index) == before) {
+        if (((id (*)(id, SEL, unsigned long))objc_msgSend)(queue, s_object_at, index) == before) {
             stop = index;
             break;
         }
     for (unsigned long index = stop; index-- > 0;) {
-        id event = ((id (*)(id, SEL, unsigned long))objc_msgSend)(queue, sel_registerName("objectAtIndex:"), index);
+        id event = ((id (*)(id, SEL, unsigned long))objc_msgSend)(queue, s_object_at, index);
         if (macoblox_mask_matches(mask, macoblox_event_type(event)))
-            ((void (*)(id, SEL, unsigned long))objc_msgSend)(queue, sel_registerName("removeObjectAtIndex:"), index);
+            ((void (*)(id, SEL, unsigned long))objc_msgSend)(queue, s_remove_at, index);
     }
     macoblox_unlock_event_queue();
 }
@@ -4364,8 +4415,7 @@ static void macoblox_remember_cookie(id cookie, int deleted) {
         }
     }
 
-    while (__sync_lock_test_and_set(&macoblox_cookie_lock, 1))
-        usleep(500);
+    macoblox_spin_lock(&macoblox_cookie_lock);
 
     if (!macoblox_saved_cookies)
         macoblox_saved_cookies = MSG0(id, MSG0(id, objc_getClass("NSMutableDictionary"), "alloc"), "init");
@@ -4395,7 +4445,7 @@ static void macoblox_remember_cookie(id cookie, int deleted) {
         MSG2(void, macoblox_saved_cookies, "setObject:forKey:", entry, key);
     }
     macoblox_write_saved_cookies_locked();
-    __sync_lock_release(&macoblox_cookie_lock);
+    macoblox_spin_unlock(&macoblox_cookie_lock);
 }
 
 static void (*orig_cookie_storage_set)(id, SEL, id) = 0;
@@ -4438,8 +4488,7 @@ static id hooked_cookie_storage_for_url(id self, SEL cmd, id url) {
         MSG1(void, present, "addObject:", MSG0(id, cookie, "name"));
     }
     id now = MSG0(id, objc_getClass("NSDate"), "date");
-    while (__sync_lock_test_and_set(&macoblox_cookie_lock, 1))
-        usleep(500);
+    macoblox_spin_lock(&macoblox_cookie_lock);
 
     id entries = macoblox_saved_cookies ? MSG0(id, macoblox_saved_cookies, "allValues") : 0;
     unsigned long entry_count = entries ? MSG0(unsigned long, entries, "count") : 0;
@@ -4486,7 +4535,7 @@ static id hooked_cookie_storage_for_url(id self, SEL cmd, id url) {
             MSG1(void, present, "addObject:", name);
         }
     }
-    __sync_lock_release(&macoblox_cookie_lock);
+    macoblox_spin_unlock(&macoblox_cookie_lock);
 
     MSG0(void, present, "release");
     return MSG0(id, merged, "autorelease");
@@ -4508,8 +4557,7 @@ static void macoblox_load_cookies(void) {
     int loaded = 0;
     macoblox_loading_cookies = 1;
 
-    while (__sync_lock_test_and_set(&macoblox_cookie_lock, 1))
-        usleep(500);
+    macoblox_spin_lock(&macoblox_cookie_lock);
 
     for (unsigned long index = 0; index < count; index++) {
         id entry = ((id (*)(id, SEL, unsigned long))objc_msgSend)(entries, sel_registerName("objectAtIndex:"), index);
@@ -4544,7 +4592,7 @@ static void macoblox_load_cookies(void) {
             loaded++;
         }
     }
-    __sync_lock_release(&macoblox_cookie_lock);
+    macoblox_spin_unlock(&macoblox_cookie_lock);
 
     macoblox_loading_cookies = 0;
     write_str("[MacOBlox Cookies] loaded ");
@@ -4561,15 +4609,14 @@ static volatile int macoblox_display_lock;
 static id shared_current_display(id cls, SEL cmd) {
     if (macoblox_shared_display)
         return macoblox_shared_display;
-    while (__sync_lock_test_and_set(&macoblox_display_lock, 1))
-        usleep(1000);
+    macoblox_spin_lock(&macoblox_display_lock);
     if (!macoblox_shared_display) {
         id display = orig_current_display(cls, cmd);
         if (display)
             macoblox_shared_display = ((id (*)(id, SEL))objc_msgSend)(
                 display, sel_registerName("retain"));
     }
-    __sync_lock_release(&macoblox_display_lock);
+    macoblox_spin_unlock(&macoblox_display_lock);
     return macoblox_shared_display;
 }
 

@@ -35,14 +35,30 @@ static int macoblox_pthread_mutex_lock(void *mutex) {
     int result = pthread_mutex_trylock(mutex);
     if (result != DARWIN_EBUSY)
         return result;
-    for (int attempt = 0; attempt < 64; attempt++) {
+
+    /* 1. Fast path: CPU pause instruction with exponential backoff.
+     * Most critical sections in Roblox (physics, audio, RakNet, rendering) are
+     * held for < 1 us. Spinning with __builtin_ia32_pause() resolves contentions
+     * in user space with zero kernel syscalls or thread context switches. */
+    for (int backoff = 1; backoff <= 32; backoff++) {
+        for (int p = 0; p < backoff; p++) {
+            __builtin_ia32_pause();
+        }
+        result = pthread_mutex_trylock(mutex);
+        if (result != DARWIN_EBUSY)
+            return result;
+    }
+
+    /* 2. Cooperative thread yields for medium-duration holds */
+    for (int attempt = 0; attempt < 32; attempt++) {
         sched_yield();
         result = pthread_mutex_trylock(mutex);
         if (result != DARWIN_EBUSY)
             return result;
     }
-    /* ~200 ms of 50 us naps before trusting the psynch wait. */
-    for (int attempt = 0; attempt < 4000; attempt++) {
+
+    /* 3. Microsecond naps (~50 ms total) before falling back to darlingserver psynch wait */
+    for (int attempt = 0; attempt < 1000; attempt++) {
         usleep(50);
         result = pthread_mutex_trylock(mutex);
         if (result != DARWIN_EBUSY)
@@ -252,7 +268,11 @@ static struct darwin_passwd macoblox_fake_pw = {
     0,
 };
 
+static volatile int macoblox_pw_inited = 0;
+
 static void macoblox_setup_fake_pw(const char *name_override, unsigned int uid) {
+    if (!__sync_bool_compare_and_swap(&macoblox_pw_inited, 0, 1))
+        return;
     const char *user = name_override && name_override[0] ? name_override : getenv("USER");
     const char *home = getenv("HOME");
     if (user && user[0]) {

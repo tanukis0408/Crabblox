@@ -29,3 +29,7 @@ __pycache__/
 /flatpak/build.log
 /flatpak/.flatpak-builder/
 /flatpak/*.flatpak
+
+# Credentials and local state
+accounts.json
+*.token

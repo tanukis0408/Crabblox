@@ -57,7 +57,9 @@ void macoblox_note_pixel_format(void *format, const unsigned int *attributes) {
         if (takes_value(attributes[index]))
             index++;
     }
-    while (__sync_lock_test_and_set(&formats_lock, 1)) {}
+    while (__sync_lock_test_and_set(&formats_lock, 1)) {
+        __builtin_ia32_pause();
+    }
     int slot = 0;
     for (int i = 0; i < 32; i++) {
         if (formats[i].format == format || !formats[i].format) { slot = i; break; }
@@ -70,7 +72,9 @@ void macoblox_note_pixel_format(void *format, const unsigned int *attributes) {
 
 void macoblox_prepare_context(void *format) {
     unsigned int profile = 0;
-    while (__sync_lock_test_and_set(&formats_lock, 1)) {}
+    while (__sync_lock_test_and_set(&formats_lock, 1)) {
+        __builtin_ia32_pause();
+    }
     for (int i = 0; i < 32; i++)
         if (format && formats[i].format == format)
             profile = formats[i].profile;
