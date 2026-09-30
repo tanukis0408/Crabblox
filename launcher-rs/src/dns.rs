@@ -91,6 +91,20 @@ pub async fn prewarm_dns() {
         "setup.rbxcdn.com",
         "assetdelivery.roblox.com",
         "clientsettingscdn.roblox.com",
+        "c1.rbxcdn.com",
+        "c2.rbxcdn.com",
+        "c3.rbxcdn.com",
+        "c4.rbxcdn.com",
+        "c5.rbxcdn.com",
+        "c6.rbxcdn.com",
+        "c7.rbxcdn.com",
+        "t1.rbxcdn.com",
+        "t2.rbxcdn.com",
+        "t3.rbxcdn.com",
+        "t4.rbxcdn.com",
+        "t5.rbxcdn.com",
+        "t6.rbxcdn.com",
+        "t7.rbxcdn.com",
     ];
 
     for domain in domains {
@@ -161,6 +175,22 @@ async fn handle_query(
         }
     }
 
+    // Fastly probe and blocked analytics beacons: return 127.0.0.1 so the probe immediately fails in 0ms
+    // without stalling libcurl connection pools on 5-second timeouts.
+    if qname == "roblox-poc.global.ssl.fastly.net"
+        || qname == "pulsar.roblox.com"
+        || qname == "silver.roblox.com"
+        || qname == "ecsv2.roblox.com"
+    {
+        let resp = if qtype == 1 {
+            make_a_response(&query, &["127.0.0.1"])
+        } else {
+            make_empty_response(&query)
+        };
+        let _ = socket.send_to(&resp, peer).await;
+        return;
+    }
+
     let key = query[2..].to_vec();
     let now = Instant::now();
 
@@ -224,7 +254,10 @@ async fn handle_query(
                     let octets = v4.ip().octets();
                     let is_cf = (octets[0] == 104 && (16..=31).contains(&octets[1]))
                         || (octets[0] == 172 && (64..=71).contains(&octets[1]));
-                    if is_cf {
+                    let lower_qname = qname.to_lowercase();
+                    let is_roblox_api = (lower_qname.ends_with(".roblox.com") || lower_qname == "roblox.com")
+                        && !lower_qname.ends_with("rbxcdn.com");
+                    if is_cf && is_roblox_api {
                         ips.push("128.116.5.3".to_string());
                     } else {
                         ips.push(v4.ip().to_string());
@@ -418,7 +451,7 @@ async fn resolve_doh(query: &[u8]) -> Option<Vec<u8>> {
     .flatten()
 }
 
-fn sanitize_response(response: &[u8], _qname: &str) -> Vec<u8> {
+fn sanitize_response(response: &[u8], qname: &str) -> Vec<u8> {
     if response.len() < 12 {
         return response.to_vec();
     }
@@ -449,6 +482,10 @@ fn sanitize_response(response: &[u8], _qname: &str) -> Vec<u8> {
         None => return res,
     };
 
+    let lower_qname = qname.to_lowercase();
+    let is_roblox_api = (lower_qname.ends_with(".roblox.com") || lower_qname == "roblox.com")
+        && !lower_qname.ends_with("rbxcdn.com");
+
     for _ in 0..answers {
         offset = match skip_name(&res, offset) {
             Some(o) => o,
@@ -467,8 +504,8 @@ fn sanitize_response(response: &[u8], _qname: &str) -> Vec<u8> {
             // Check for Cloudflare ranges: 104.16.0.0 - 104.31.255.255, 172.64.0.0 - 172.71.255.255
             let is_cf = (octets[0] == 104 && (16..=31).contains(&octets[1]))
                 || (octets[0] == 172 && (64..=71).contains(&octets[1]));
-            if is_cf {
-                // Replace with Roblox edge gateway
+            if is_cf && is_roblox_api {
+                // Replace with Roblox edge gateway for blocked API domains only
                 res[offset..offset + 4].copy_from_slice(&[128, 116, 5, 3]);
             }
         }
@@ -548,9 +585,14 @@ mod tests {
         // For general roblox.com, it should rewrite to 128.116.5.3
         assert!(sanitized.windows(4).any(|w| w == [128, 116, 5, 3]));
 
-        // For all roblox domains, it should rewrite Cloudflare IP to 128.116.5.3 to prevent TSPU drops
+        // For all roblox API domains, it should rewrite Cloudflare IP to 128.116.5.3 to prevent TSPU drops
         let auth_sanitized = sanitize_response(&cf_resp, "auth.roblox.com");
         assert!(auth_sanitized.windows(4).any(|w| w == [128, 116, 5, 3]));
+
+        // For CDN domains (rbxcdn.com), it must NEVER rewrite to API edge gateway (128.116.5.3)
+        let cdn_sanitized = sanitize_response(&cf_resp, "c3.rbxcdn.com");
+        assert!(!cdn_sanitized.windows(4).any(|w| w == [128, 116, 5, 3]));
+        assert!(cdn_sanitized.windows(4).any(|w| w == [104, 18, 2, 63]));
     }
 }
 

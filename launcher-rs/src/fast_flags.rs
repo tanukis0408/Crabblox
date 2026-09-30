@@ -409,13 +409,25 @@ impl FastFlags {
             }
         }
 
+        // Remove flags that break OpenGL shaders (e.g. Unified light culling requires
+        // compute shaders not present in macOS Core Profile 4.1) or cause map loading freezes.
+        if flags.remove("FFlagFastGPULightCulling3").is_some() {
+            changed = true;
+        }
+        if flags.remove("DFIntCSGLevelOfDetailSwitchingDistance").is_some() {
+            changed = true;
+        }
+        if flags.remove("DFIntCSGLevelOfDetailSwitchingDistanceL2").is_some() {
+            changed = true;
+        }
+
         let perf_defaults = [
-            ("FFlagFastGPULightCulling3", serde_json::json!("True")),
-            ("FIntMeshContentProviderCacheSizeTotalMb", serde_json::json!(512)),
             ("FFlagPreloadAllFonts", serde_json::json!("True")),
+            ("FFlagPreloadTextureItems", serde_json::json!("True")),
             ("DFIntTaskSchedulerTargetFps", serde_json::json!(240)),
-            ("DFIntCSGLevelOfDetailSwitchingDistance", serde_json::json!(500)),
-            ("DFIntCSGLevelOfDetailSwitchingDistanceL2", serde_json::json!(1000)),
+            ("DFIntAssetPreloadMaxParallelTasks", serde_json::json!(64)),
+            ("DFIntContentProviderPreloadTasks", serde_json::json!(32)),
+            ("FIntRuntimeMaxNumOfThreads", serde_json::json!(8)),
             ("FFlagDebugDisableTelemetry", serde_json::json!("True")),
             ("FFlagDisableCrashReporting", serde_json::json!("True")),
             ("FFlagEnableInGameMenuControls", serde_json::json!("True")),
@@ -601,8 +613,8 @@ mod tests {
         assert_eq!(flags.get("DFFlagCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
         assert_eq!(flags.get("FFlagUnifiedCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
         assert_eq!(flags.get("DFFlagUnifiedCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
-        assert_eq!(flags.get("FFlagFastGPULightCulling3").and_then(|v| v.as_str()), Some("True"));
-        assert_eq!(flags.get("FIntMeshContentProviderCacheSizeTotalMb").and_then(|v| v.as_i64()), Some(512));
+        assert!(flags.get("FFlagFastGPULightCulling3").is_none());
+        assert_eq!(flags.get("DFIntAssetPreloadMaxParallelTasks").and_then(|v| v.as_i64()), Some(64));
         assert_eq!(flags.get("DFIntTaskSchedulerTargetFps").and_then(|v| v.as_i64()), Some(240));
     }
 

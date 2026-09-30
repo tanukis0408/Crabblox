@@ -96,8 +96,10 @@ impl HostAudio {
             }
         }
 
-        // Open write-only non-blocking so the writer stays open continuously
+        // Open read-write non-blocking so the writer stays open continuously
+        // without waiting for an external reader (opening O_WRONLY | O_NONBLOCK returns ENXIO on Linux).
         let keep_file = fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .custom_flags(libc::O_NONBLOCK)
             .open(&fifo_path)
@@ -396,14 +398,11 @@ pub fn detect_gpu_environment() -> GpuEnvironment {
     }
 
     // Modern Mesa performance flags: single-file disk cache prevents inode flooding & stutter,
-    // 2GB shader cache prevents eviction, vblank_mode=0 allows true unlocked framerates,
-    // and mesa_glthread enables multi-threaded driver dispatch.
+    // 2GB shader cache prevents eviction, and vblank_mode=0 allows true unlocked framerates.
     env_vars.push(("MESA_DISK_CACHE_SINGLE_FILE".into(), "1".into()));
     env_vars.push(("MESA_GLSL_CACHE_MAX_SIZE".into(), "2G".into()));
     env_vars.push(("MESA_SHADER_CACHE_MAX_SIZE".into(), "2G".into()));
     env_vars.push(("vblank_mode".into(), "0".into()));
-    env_vars.push(("mesa_glthread".into(), "true".into()));
-    env_vars.push(("MESA_NO_ERROR".into(), "1".into()));
 
     let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/tmp"));
     let mvk_cache_dir = home.join(".cache/crabblox/vulkan_cache");
@@ -693,7 +692,6 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         format!("MESA_SHADER_CACHE_DIR={}", shader_cache.display()),
         "__GL_SHADER_DISK_CACHE=1".into(),
         format!("__GL_SHADER_DISK_CACHE_PATH={}", home.join(".cache").display()),
-        "mesa_glthread=true".into(),
         "MACOBLOX_MOUSE_SENSITIVITY=1.00".into(),
         "PIPEWIRE_LATENCY=256/44100".into(),
         "PULSE_LATENCY_MSEC=50".into(),
@@ -708,7 +706,7 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     } else if gpu_env.is_amd {
         println!("GPU: AMD (RADV ACO shader compiler active)");
     } else if gpu_env.is_intel {
-        println!("GPU: Intel Iris (OpenGL 4.6, multithreaded GL, 2GB single-file shader cache active)");
+        println!("GPU: Intel Iris (OpenGL 4.6, 2GB single-file shader cache active)");
     }
 
     let icon_file = paths.cache_dir.join("icon.argb");
