@@ -420,28 +420,36 @@ impl FastFlags {
         if flags.remove("DFIntCSGLevelOfDetailSwitchingDistanceL2").is_some() {
             changed = true;
         }
+        if flags.remove("DFIntMaxInterpolationQueueSize").is_some() {
+            changed = true;
+        }
+        if flags.remove("DFFlagTextureQualityOverrideEnabled").is_some() {
+            changed = true;
+        }
+        if flags.remove("DFIntTextureCompositorActiveJobsLimit").is_some() {
+            changed = true;
+        }
+        if flags.remove("DFIntAssetPreloadMaxParallelTasks").is_some() {
+            changed = true;
+        }
+        if flags.remove("DFIntContentProviderPreloadTasks").is_some() {
+            changed = true;
+        }
+        if flags.remove("FIntRuntimeMaxNumOfThreads").is_some() {
+            changed = true;
+        }
 
         let perf_defaults = [
             ("FFlagPreloadAllFonts", serde_json::json!("True")),
             ("FFlagPreloadTextureItems", serde_json::json!("True")),
             ("DFIntTaskSchedulerTargetFps", serde_json::json!(240)),
-            ("DFIntAssetPreloadMaxParallelTasks", serde_json::json!(128)),
-            ("DFIntContentProviderPreloadTasks", serde_json::json!(64)),
-            ("DFIntTextureCompositorActiveJobsLimit", serde_json::json!(64)),
-            ("FIntRuntimeMaxNumOfThreads", serde_json::json!(12)),
             ("FFlagDebugDisableTelemetry", serde_json::json!("True")),
             ("FFlagDisableCrashReporting", serde_json::json!("True")),
             ("FFlagEnableInGameMenuControls", serde_json::json!("True")),
-            ("DFIntMaxInterpolationQueueSize", serde_json::json!(256)),
-            ("DFFlagTextureQualityOverrideEnabled", serde_json::json!("False")),
         ];
 
         for (k, v) in perf_defaults {
-            if !flags.contains_key(k) || flags.get(k) != Some(&v) {
-                // Keep custom user FPS cap or quality override if set
-                if k == "DFIntTaskSchedulerTargetFps" && flags.contains_key(k) {
-                    continue;
-                }
+            if !flags.contains_key(k) {
                 flags.insert(k.to_string(), v);
                 changed = true;
             }
@@ -621,7 +629,8 @@ mod tests {
         assert_eq!(flags.get("FFlagUnifiedCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
         assert_eq!(flags.get("DFFlagUnifiedCookieProtocolEnabled").and_then(|v| v.as_str()), Some("False"));
         assert!(flags.get("FFlagFastGPULightCulling3").is_none());
-        assert_eq!(flags.get("DFIntAssetPreloadMaxParallelTasks").and_then(|v| v.as_i64()), Some(128));
+        assert!(flags.get("DFIntAssetPreloadMaxParallelTasks").is_none());
+        assert!(flags.get("DFIntMaxInterpolationQueueSize").is_none());
         assert_eq!(flags.get("DFIntTaskSchedulerTargetFps").and_then(|v| v.as_i64()), Some(240));
     }
 

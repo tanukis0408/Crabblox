@@ -154,8 +154,9 @@ impl HostAudio {
         let supervisor = std::thread::Builder::new()
             .name("host-audio-supervisor".into())
             .spawn(move || {
+                let mut last_restart = std::time::Instant::now();
                 while running_clone.load(Ordering::Relaxed) {
-                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    std::thread::sleep(std::time::Duration::from_millis(500));
                     if !running_clone.load(Ordering::Relaxed) {
                         break;
                     }
@@ -173,7 +174,8 @@ impl HostAudio {
                         true
                     };
 
-                    if needs_restart && running_clone.load(Ordering::Relaxed) {
+                    if needs_restart && running_clone.load(Ordering::Relaxed) && last_restart.elapsed().as_millis() >= 2000 {
+                        last_restart = std::time::Instant::now();
                         if let Some(new_child) = spawn_audio_player(&bin_str, is_pipewire, &fifo_clone) {
                             *guard = Some(new_child);
                         }
@@ -444,11 +446,7 @@ pub fn detect_gpu_environment() -> GpuEnvironment {
     }
 
     if is_amd {
-        env_vars.push(("RADV_PERFTEST".into(), "aco,ngg".into()));
         env_vars.push(("AMD_VULKAN_ICD".into(), "RADV".into()));
-        env_vars.push(("mesa_glthread".into(), "true".into()));
-        env_vars.push(("MESA_NO_ERROR".into(), "1".into()));
-        env_vars.push(("AMD_DEBUG".into(), "nodccmsaa".into()));
         if is_hybrid && !is_nvidia {
             env_vars.push(("DRI_PRIME".into(), "1".into()));
         }
@@ -456,8 +454,6 @@ pub fn detect_gpu_environment() -> GpuEnvironment {
 
     if is_intel {
         env_vars.push(("MESA_LOADER_DRIVER_OVERRIDE".into(), "iris".into()));
-        env_vars.push(("mesa_glthread".into(), "true".into()));
-        env_vars.push(("MESA_NO_ERROR".into(), "1".into()));
     }
 
     // Modern Mesa performance flags: single-file disk cache prevents inode flooding & stutter,

@@ -175,9 +175,10 @@ async fn handle_query(
         }
     }
 
-    // Blocked telemetry and analytics beacons: return 127.0.0.1 so the request immediately fails in 0ms
+    // Fastly probe and blocked analytics beacons: return 127.0.0.1 so the probe immediately fails in 0ms
     // without stalling libcurl connection pools on 5-second timeouts.
-    if qname == "pulsar.roblox.com"
+    if qname == "roblox-poc.global.ssl.fastly.net"
+        || qname == "pulsar.roblox.com"
         || qname == "silver.roblox.com"
         || qname == "ecsv2.roblox.com"
     {
@@ -397,34 +398,62 @@ fn doh_agent() -> &'static ureq::Agent {
     })
 }
 
-async fn resolve_single_udp(query: &[u8], server: &'static str, timeout_ms: u64) -> Option<Vec<u8>> {
+async fn resolve_single_udp(query: &[u8], server: &str, timeout_ms: u64) -> Option<Vec<u8>> {
     let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
     sock.send_to(query, server).await.ok()?;
     let mut buf = [0u8; 4096];
     let (len, _) = tokio::time::timeout(Duration::from_millis(timeout_ms), sock.recv_from(&mut buf)).await.ok()?.ok()?;
     if len >= 12 && query.len() >= 2 && buf[..2] == query[..2] {
-        let answers = u16::from_be_bytes([buf[6], buf[7]]);
-        if answers > 0 {
+        let flags = u16::from_be_bytes([buf[2], buf[3]]);
+        let is_response = (flags & 0x8000) != 0;
+        if is_response {
             return Some(buf[..len].to_vec());
         }
     }
     None
 }
 
+fn get_system_nameservers() -> Vec<String> {
+    let mut servers = Vec::new();
+    if let Ok(content) = std::fs::read_to_string("/etc/resolv.conf") {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with("nameserver") {
+                if let Some(ip) = line.split_whitespace().nth(1) {
+                    if !ip.is_empty() {
+                        let addr = if ip.contains(':') {
+                            format!("[{}]:53", ip)
+                        } else {
+                            format!("{}:53", ip)
+                        };
+                        if !servers.contains(&addr) {
+                            servers.push(addr);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    servers
+}
+
 async fn resolve_udp(query: &[u8]) -> Option<Vec<u8>> {
-    let upstream_servers: [(&'static str, u64); 4] = [
-        ("127.0.0.53:53", 80),
-        ("77.88.8.8:53", 200),
-        ("1.1.1.1:53", 200),
-        ("8.8.8.8:53", 200),
-    ];
+    let mut upstream_servers = Vec::new();
+    for s in get_system_nameservers() {
+        upstream_servers.push((s, 90));
+    }
+    for fallback in ["77.88.8.8:53", "1.1.1.1:53", "8.8.8.8:53"] {
+        if !upstream_servers.iter().any(|(s, _)| s == fallback) {
+            upstream_servers.push((fallback.to_string(), 200));
+        }
+    }
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(upstream_servers.len());
     for (server, timeout_ms) in upstream_servers {
         let q = query.to_vec();
         let tx_c = tx.clone();
         tokio::spawn(async move {
-            if let Some(resp) = resolve_single_udp(&q, server, timeout_ms).await {
+            if let Some(resp) = resolve_single_udp(&q, &server, timeout_ms).await {
                 let _ = tx_c.send(resp).await;
             }
         });
