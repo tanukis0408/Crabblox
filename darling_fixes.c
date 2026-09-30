@@ -307,3 +307,81 @@ static struct darwin_passwd *macoblox_getpwnam(const char *name) {
 }
 DYLD_INTERPOSE(macoblox_getpwnam, getpwnam)
 
+/* proc_pidinfo: Darling's libsystem_kernel lacks support for flavor 1 (PROC_PIDTASKINFO),
+ * printing "sys_proc_info(): Unsupported pidinfo flavor: 1" and failing.
+ * Roblox queries this to measure memory usage and resident set size.
+ * Interpose flavor 1 and populate with real memory statistics from /proc/self/statm. */
+#define DARWIN_PROC_PIDTASKINFO 1
+struct darwin_proc_taskinfo {
+    unsigned long long pti_virtual_size;       /* virtual memory size (bytes) */
+    unsigned long long pti_resident_size;      /* resident memory size (bytes) */
+    unsigned long long pti_total_user;         /* total user time */
+    unsigned long long pti_total_system;       /* total system time */
+    unsigned long long pti_threads_user;       /* total thread user time */
+    unsigned long long pti_threads_system;     /* total thread system time */
+    int                pti_policy;             /* default policy for new threads */
+    int                pti_faults;             /* number of page faults */
+    int                pti_pageins;            /* number of actual pageins */
+    int                pti_cow_faults;         /* number of copy-on-write faults */
+    int                pti_messages_sent;      /* number of messages sent */
+    int                pti_messages_received;  /* number of messages received */
+    int                pti_syscalls_mach;      /* number of mach system calls */
+    int                pti_syscalls_unix;      /* number of unix system calls */
+    int                pti_csw;                /* number of context switches */
+    int                pti_threadnum;          /* number of threads in the task */
+    int                pti_numrunning;         /* number of running threads */
+    int                pti_priority;           /* task priority */
+};
+
+extern int proc_pidinfo(int, int, unsigned long long, void *, int);
+extern int open(const char *, int, ...);
+extern long read(int, void *, unsigned long);
+extern int close(int);
+
+static int macoblox_proc_pidinfo(int pid, int flavor, unsigned long long arg, void *buffer, int buffersize) {
+    if (flavor == DARWIN_PROC_PIDTASKINFO && buffer && buffersize >= (int)sizeof(struct darwin_proc_taskinfo)) {
+        struct darwin_proc_taskinfo *info = (struct darwin_proc_taskinfo *)buffer;
+        unsigned char *p = (unsigned char *)buffer;
+        for (unsigned long i = 0; i < sizeof(struct darwin_proc_taskinfo); i++) {
+            p[i] = 0;
+        }
+
+        unsigned long long total_pages = 250000;
+        unsigned long long res_pages = 100000;
+
+        char path[64];
+        if (pid <= 0) {
+            snprintf(path, sizeof(path), "/proc/self/statm");
+        } else {
+            snprintf(path, sizeof(path), "/proc/%d/statm", pid);
+        }
+
+        int fd = open(path, 0 /* O_RDONLY */);
+        if (fd >= 0) {
+            char buf[128];
+            long n = read(fd, buf, sizeof(buf) - 1);
+            close(fd);
+            if (n > 0) {
+                buf[n] = 0;
+                unsigned long long v1 = 0, v2 = 0;
+                char *s = buf;
+                while (*s == ' ' || *s == '\t') s++;
+                while (*s >= '0' && *s <= '9') { v1 = v1 * 10 + (*s - '0'); s++; }
+                while (*s == ' ' || *s == '\t') s++;
+                while (*s >= '0' && *s <= '9') { v2 = v2 * 10 + (*s - '0'); s++; }
+                if (v1 > 0) total_pages = v1;
+                if (v2 > 0) res_pages = v2;
+            }
+        }
+
+        info->pti_virtual_size = total_pages * 4096ULL;
+        info->pti_resident_size = res_pages * 4096ULL;
+        info->pti_threadnum = 16;
+        info->pti_numrunning = 4;
+        return (int)sizeof(struct darwin_proc_taskinfo);
+    }
+    return proc_pidinfo(pid, flavor, arg, buffer, buffersize);
+}
+DYLD_INTERPOSE(macoblox_proc_pidinfo, proc_pidinfo)
+
+

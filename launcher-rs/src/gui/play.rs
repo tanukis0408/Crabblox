@@ -524,7 +524,9 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                                 }
                                 last_seen = std::time::Instant::now();
                             } else if seen_roblox {
-                                if last_seen.elapsed().as_secs() >= 2 {
+                                // Grace period for place teleports and scene reloads: never prematurely kill
+                                // the game while connecting to a new server or place.
+                                if last_seen.elapsed().as_secs() >= 15 {
                                     runner::stop_roblox();
                                     let _ = session.child.kill();
                                     let _ = session.child.wait();

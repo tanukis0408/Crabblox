@@ -475,12 +475,15 @@ extern long write(int, const void *, unsigned long);
 extern int close(int);
 extern int *__error(void);
 extern int pthread_sigmask(int, const unsigned int *, unsigned int *);
+typedef void (*darwin_sig_t)(int);
+extern darwin_sig_t signal(int, darwin_sig_t);
 #define FIFO_AHEAD_FRAMES 4096
 
 static void *unit_fifo_thread(void *context) {
     OutputUnit *unit = context;
     const char *path = getenv("MACOBLOX_AUDIO_FIFO");
-    /* A reader that went away must give EPIPE here, not kill the game. */
+    /* A reader that went away must give EPIPE here, never kill the game. */
+    signal(13 /* SIGPIPE */, (darwin_sig_t)1 /* SIG_IGN */);
     unsigned int block_pipe = 1u << (13 - 1); /* SIGPIPE */
     pthread_sigmask(1 /* SIG_BLOCK */, &block_pipe, 0);
     UInt32 frame_bytes = unit_frame_bytes(unit);

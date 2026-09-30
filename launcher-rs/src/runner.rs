@@ -7,6 +7,8 @@ use std::io::{Read, Seek, SeekFrom};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 const LAUNCH_SCRIPT: &str = r#"
 app_dir=$1 shim_dir=$2; shift 2
@@ -28,11 +30,40 @@ export DYLD_LIBRARY_PATH="$shim_dir:$app_dir"
 exec ./RobloxPlayer "${extra_args[@]}"
 "#;
 
+fn spawn_audio_player(bin: &str, is_pipewire: bool, fifo_path: &Path) -> Option<Child> {
+    let mut cmd = Command::new(bin);
+    if is_pipewire {
+        cmd.args([
+            "--playback", "--raw", "--format", "f32", "--rate", "44100",
+            "--channels", "2", "--latency", "40ms", "--media-role", "Game",
+            "-P", "{ application.name = \"Roblox\" application.process.binary = \"crabblox\" media.name = \"Roblox (Crabblox)\" node.name = \"Roblox\" node.latency = 1024/44100 }",
+            fifo_path.to_str()?,
+        ]);
+        cmd.env("PIPEWIRE_LATENCY", "1024/44100");
+    } else {
+        cmd.args([
+            "--playback", "--raw", "--format=float32le", "--rate=44100",
+            "--channels=2", "--latency-msec=40", "--client-name=Roblox",
+            "--stream-name=Roblox (Crabblox)", "--property=media.role=game",
+            fifo_path.to_str()?,
+        ]);
+        cmd.env("PULSE_LATENCY_MSEC", "40");
+    }
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()
+}
+
 pub struct HostAudio {
     pub fifo_path: PathBuf,
     #[allow(dead_code)]
     pub keep_file: fs::File,
-    pub player: Child,
+    pub player: Arc<Mutex<Option<Child>>>,
+    pub running: Arc<AtomicBool>,
+    supervisor: Option<std::thread::JoinHandle<()>>,
 }
 
 impl HostAudio {
@@ -111,44 +142,68 @@ impl HostAudio {
             let _ = libc::fcntl(keep_file.as_raw_fd(), libc::F_SETPIPE_SZ, 65536);
         }
 
-        let mut cmd = Command::new(player_bin);
-        if is_pipewire {
-            cmd.args([
-                "--playback", "--raw", "--format", "f32", "--rate", "44100",
-                "--channels", "2", "--latency", "40ms", "--media-role", "Game",
-                "-P", "{ application.name = \"Roblox\" application.process.binary = \"crabblox\" media.name = \"Roblox (Crabblox)\" node.name = \"Roblox\" node.latency = 1024/44100 }",
-                fifo_path.to_str()?,
-            ]);
-            cmd.env("PIPEWIRE_LATENCY", "1024/44100");
-        } else {
-            cmd.args([
-                "--playback", "--raw", "--format=float32le", "--rate=44100",
-                "--channels=2", "--latency-msec=40", "--client-name=Roblox",
-                "--stream-name=Roblox (Crabblox)", "--property=media.role=game",
-                fifo_path.to_str()?,
-            ]);
-            cmd.env("PULSE_LATENCY_MSEC", "40");
-        }
+        let initial_player = spawn_audio_player(player_bin, is_pipewire, &fifo_path)?;
+        let player = Arc::new(Mutex::new(Some(initial_player)));
+        let running = Arc::new(AtomicBool::new(true));
 
-        let player = cmd
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
+        let running_clone = Arc::clone(&running);
+        let player_clone = Arc::clone(&player);
+        let fifo_clone = fifo_path.clone();
+        let bin_str = player_bin.to_string();
+
+        let supervisor = std::thread::Builder::new()
+            .name("host-audio-supervisor".into())
+            .spawn(move || {
+                while running_clone.load(Ordering::Relaxed) {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    if !running_clone.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let mut guard = match player_clone.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => poisoned.into_inner(),
+                    };
+                    let needs_restart = if let Some(ref mut child) = *guard {
+                        match child.try_wait() {
+                            Ok(Some(_status)) => true,
+                            Ok(None) => false,
+                            Err(_) => true,
+                        }
+                    } else {
+                        true
+                    };
+
+                    if needs_restart && running_clone.load(Ordering::Relaxed) {
+                        if let Some(new_child) = spawn_audio_player(&bin_str, is_pipewire, &fifo_clone) {
+                            *guard = Some(new_child);
+                        }
+                    }
+                }
+            })
+            .ok();
 
         Some(Self {
             fifo_path,
             keep_file,
             player,
+            running,
+            supervisor,
         })
     }
 }
 
 impl Drop for HostAudio {
     fn drop(&mut self) {
-        let _ = self.player.kill();
-        let _ = self.player.wait();
+        self.running.store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = self.player.lock() {
+            if let Some(mut child) = guard.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+        if let Some(handle) = self.supervisor.take() {
+            let _ = handle.join();
+        }
         let _ = fs::remove_file(&self.fifo_path);
     }
 }
@@ -205,10 +260,10 @@ impl Drop for RobloxSession {
         }
         self.dns.stop();
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        let exit_status = self.child.wait().ok();
         stop_roblox();
         if !self.diagnostics_performed {
-            if let Ok(Some(status)) = self.child.try_wait() {
+            if let Some(status) = exit_status {
                 if !status.success() {
                     scan_crash_diagnostics_with_status(&self.log_path, Some(&status));
                     self.diagnostics_performed = true;
@@ -389,9 +444,11 @@ pub fn detect_gpu_environment() -> GpuEnvironment {
     }
 
     if is_amd {
-        env_vars.push(("RADV_PERFTEST".into(), "aco".into()));
+        env_vars.push(("RADV_PERFTEST".into(), "aco,ngg".into()));
         env_vars.push(("AMD_VULKAN_ICD".into(), "RADV".into()));
         env_vars.push(("mesa_glthread".into(), "true".into()));
+        env_vars.push(("MESA_NO_ERROR".into(), "1".into()));
+        env_vars.push(("AMD_DEBUG".into(), "nodccmsaa".into()));
         if is_hybrid && !is_nvidia {
             env_vars.push(("DRI_PRIME".into(), "1".into()));
         }
@@ -400,6 +457,7 @@ pub fn detect_gpu_environment() -> GpuEnvironment {
     if is_intel {
         env_vars.push(("MESA_LOADER_DRIVER_OVERRIDE".into(), "iris".into()));
         env_vars.push(("mesa_glthread".into(), "true".into()));
+        env_vars.push(("MESA_NO_ERROR".into(), "1".into()));
     }
 
     // Modern Mesa performance flags: single-file disk cache prevents inode flooding & stutter,
