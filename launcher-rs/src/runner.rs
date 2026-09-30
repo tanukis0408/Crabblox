@@ -440,6 +440,11 @@ pub fn clear_stale_darling(prefix: &std::path::Path) {
         let _ = fs::remove_file(&sock_path);
     }
 
+    let shellspawn_sock = prefix.join("var/run/shellspawn.sock");
+    if shellspawn_sock.exists() && !is_darlingserver_running(prefix) {
+        let _ = fs::remove_file(&shellspawn_sock);
+    }
+
     // Also clean up any abandoned Darling sockets in /tmp for this user
     let uid = unsafe { libc::getuid() };
     let username = std::env::var("USER").unwrap_or_default();
@@ -504,6 +509,7 @@ pub fn restart_darling(prefix: &std::path::Path) {
 
     let _ = fs::remove_file(prefix.join(".init.pid"));
     let _ = fs::remove_file(prefix.join(".darlingserver.sock"));
+    let _ = fs::remove_file(prefix.join("var/run/shellspawn.sock"));
 }
 
 pub fn roblox_pids() -> Vec<i32> {
@@ -628,7 +634,7 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     // Warm up darlingserver if not running
     if !is_darlingserver_running(&paths.darling_prefix) {
         let warmup = Command::new("darling")
-            .args(["shell", "/usr/bin/true"])
+            .args(["shell", "/bin/true"])
             .env("DPREFIX", &paths.darling_prefix)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -639,7 +645,7 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
             if !status.success() {
                 restart_darling(&paths.darling_prefix);
                 let _ = Command::new("darling")
-                    .args(["shell", "/usr/bin/true"])
+                    .args(["shell", "/bin/true"])
                     .env("DPREFIX", &paths.darling_prefix)
                     .stdin(Stdio::null())
                     .stdout(Stdio::null())
@@ -1083,12 +1089,14 @@ pub fn scan_crash_diagnostics_with_exit(
         });
     }
 
-    // 5. Darlingserver communication failure
+    // 5. Darlingserver / shellspawn communication failure
     let is_ds = content_lower.contains("cannot connect to darlingserver")
         || content_lower.contains("failed to connect to darlingserver")
         || content_lower.contains("darlingserver communication failure")
         || content_lower.contains("communication error with darlingserver")
         || content_lower.contains("darlingserver is not responding")
+        || content_lower.contains("shellspawn")
+        || content_lower.contains("error connecting to shellspawn")
         || (content_lower.contains("darlingserver")
             && (content_lower.contains("connection refused")
                 || content_lower.contains("broken pipe")
@@ -1099,12 +1107,14 @@ pub fn scan_crash_diagnostics_with_exit(
     if is_ds {
         diagnoses.push(CrashDiagnosis {
             category: CrashCategory::DarlingServerFailure,
-            title: "Darlingserver Container Daemon Failure".to_string(),
-            description: "The Darling container daemon is unresponsive, terminated, or socket communication was lost.".to_string(),
+            title: "Darlingserver / Shellspawn Container Failure".to_string(),
+            description: "The Darling container daemon (darlingserver/shellspawn) is not running, crashed, or could not create its socket in ~/.darling/var/run/.".to_string(),
             advice: vec![
-                "Restart Darling and clear stale state: crabblox run --restart-darling".to_string(),
-                "Kill any lingering darlingserver processes: killall -9 darlingserver".to_string(),
-                "Remove any stale socket/pid files in the Darling prefix (e.g. ~/.darling/.darlingserver.sock).".to_string(),
+                "Check ~/.darling directory permissions (if previously run with sudo): sudo chown -R $USER:$USER ~/.darling".to_string(),
+                "Restart the Darling container daemon: darling shutdown && crabblox run --restart-darling".to_string(),
+                "Kill any lingering processes: killall -9 darlingserver launchd 2>/dev/null".to_string(),
+                "If on Ubuntu 24.04/Debian with AppArmor unprivileged user namespace restrictions: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0".to_string(),
+                "If prefix is corrupted, perform a fresh reset: darling shutdown && rm -rf ~/.darling && darling shell /bin/echo ok".to_string(),
             ],
         });
     }
@@ -1228,6 +1238,16 @@ mod tests {
         let mut file = temp.as_file();
         writeln!(file, "Cannot connect to darlingserver: Connection refused").unwrap();
         writeln!(file, "Failed to connect to darlingserver at .darlingserver.sock").unwrap();
+
+        let diags = scan_crash_diagnostics(temp.path());
+        assert!(diags.iter().any(|d| d.category == CrashCategory::DarlingServerFailure));
+    }
+
+    #[test]
+    fn test_scan_crash_diagnostics_shellspawn() {
+        let temp = tempfile::NamedTempFile::new().unwrap();
+        let mut file = temp.as_file();
+        writeln!(file, "Error connecting to shellspawn in the container (/home/mein/.darling/var/run/shellspawn.sock): No such file or directory").unwrap();
 
         let diags = scan_crash_diagnostics(temp.path());
         assert!(diags.iter().any(|d| d.category == CrashCategory::DarlingServerFailure));
