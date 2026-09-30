@@ -39,6 +39,7 @@ W OSStatus AudioObjectIsPropertySettable(UInt32, const PropertyAddress *, unsign
 W OSStatus AudioObjectAddPropertyListener(UInt32, const PropertyAddress *, ListenerProc, void *);
 W OSStatus AudioObjectRemovePropertyListener(UInt32, const PropertyAddress *, ListenerProc, void *);
 W void *AudioComponentFindNext(void *, const ComponentDescription *);
+W OSStatus AudioComponentGetDescription(void *, ComponentDescription *);
 W OSStatus AudioComponentInstanceNew(void *, void **);
 W OSStatus AudioUnitSetProperty(void *, UInt32, UInt32, UInt32, const void *, UInt32);
 W OSStatus AudioUnitGetProperty(void *, UInt32, UInt32, UInt32, void *, UInt32 *);
@@ -378,6 +379,7 @@ typedef struct {
 #define PROPERTY_NOT_WRITABLE (-10865)
 
 static void *hal_component;
+static void *def_component;
 
 static OutputUnit *as_unit(void *instance) {
     OutputUnit *unit = instance;
@@ -415,23 +417,27 @@ static void unit_render(OutputUnit *unit, unsigned char *out, UInt32 frames) {
     if (unit->render && !planar) {
         BufferList list = {1, {{channels, frames * frame_bytes, out}}};
         status = unit->render(unit->render_context, &flags, &stamp, 0, frames, &list);
-    } else if (unit->render && unit->scratch) {
-        struct { UInt32 count; Buffer buffers[8]; } list = {0};
-        list.count = channels > 8 ? 8 : channels;
-        for (UInt32 c = 0; c < list.count; c++) {
-            list.buffers[c].channels = 1;
-            list.buffers[c].byte_size = frames * sample_bytes;
-            list.buffers[c].data = (unsigned char *)unit->scratch + (unsigned long)c * frames * sample_bytes;
-        }
-        status = unit->render(unit->render_context, &flags, &stamp, 0, frames, (BufferList *)&list);
-        for (UInt32 f = 0; f < frames; f++) {
-            for (UInt32 c = 0; c < list.count; c++)
-                for (UInt32 b = 0; b < sample_bytes; b++)
-                    out[(f * channels + c) * sample_bytes + b] =
-                        ((unsigned char *)list.buffers[c].data)[f * sample_bytes + b];
-            for (UInt32 c = list.count; c < channels; c++)
-                for (UInt32 b = 0; b < sample_bytes; b++)
-                    out[(f * channels + c) * sample_bytes + b] = 0;
+    } else if (unit->render) {
+        if (!unit->scratch)
+            unit->scratch = malloc((unsigned long)RENDER_FRAMES * (channels > 8 ? channels : 8) * sample_bytes);
+        if (unit->scratch) {
+            struct { UInt32 count; Buffer buffers[8]; } list = {0};
+            list.count = channels > 8 ? 8 : channels;
+            for (UInt32 c = 0; c < list.count; c++) {
+                list.buffers[c].channels = 1;
+                list.buffers[c].byte_size = frames * sample_bytes;
+                list.buffers[c].data = (unsigned char *)unit->scratch + (unsigned long)c * frames * sample_bytes;
+            }
+            status = unit->render(unit->render_context, &flags, &stamp, 0, frames, (BufferList *)&list);
+            for (UInt32 f = 0; f < frames; f++) {
+                for (UInt32 c = 0; c < list.count; c++)
+                    for (UInt32 b = 0; b < sample_bytes; b++)
+                        out[(f * channels + c) * sample_bytes + b] =
+                            ((unsigned char *)list.buffers[c].data)[f * sample_bytes + b];
+                for (UInt32 c = list.count; c < channels; c++)
+                    for (UInt32 b = 0; b < sample_bytes; b++)
+                        out[(f * channels + c) * sample_bytes + b] = 0;
+            }
         }
     }
     if (status != NO_ERROR)
@@ -486,13 +492,12 @@ static void *unit_fifo_thread(void *context) {
     signal(13 /* SIGPIPE */, (darwin_sig_t)1 /* SIG_IGN */);
     unsigned int block_pipe = 1u << (13 - 1); /* SIGPIPE */
     pthread_sigmask(1 /* SIG_BLOCK */, &block_pipe, 0);
-    UInt32 frame_bytes = unit_frame_bytes(unit);
-    unsigned long chunk = (unsigned long)RENDER_FRAMES * frame_bytes;
-    unsigned char *block = malloc(chunk);
+    /* Allocate block large enough for up to 8 channels 32-bit float */
+    unsigned long max_chunk = (unsigned long)RENDER_FRAMES * 8 * sizeof(float);
+    unsigned char *block = malloc(max_chunk);
     int fd = -1;
     unsigned long long start = mach_absolute_time();
     unsigned long long frames_written = 0;
-    Float64 rate = unit->format.sample_rate > 0 ? unit->format.sample_rate : 44100.0;
     while (block && unit->producing) {
         if (fd < 0) {
             fd = open(path, 1 /* O_WRONLY */);
@@ -503,6 +508,11 @@ static void *unit_fifo_thread(void *context) {
             start = mach_absolute_time();
             frames_written = 0;
         }
+        Float64 rate = unit->format.sample_rate > 0 ? unit->format.sample_rate : 44100.0;
+        UInt32 frame_bytes = unit_frame_bytes(unit);
+        unsigned long chunk = (unsigned long)RENDER_FRAMES * frame_bytes;
+        if (chunk > max_chunk) chunk = max_chunk;
+
         double elapsed = (double)(mach_absolute_time() - start) / 1e9;
         double ahead = (double)frames_written - elapsed * rate;
         if (ahead > FIFO_AHEAD_FRAMES) {
@@ -588,10 +598,12 @@ static void unit_stop(OutputUnit *unit) {
 
 static void *t_find(void *after, const ComponentDescription *description) {
     void *component = AudioComponentFindNext(after, description);
-    if (description && description->type == FOURCC('a', 'u', 'o', 'u') &&
-        (description->subtype == FOURCC('a', 'h', 'a', 'l') ||
-         description->subtype == FOURCC('d', 'e', 'f', ' ')))
-        hal_component = component;
+    if (component && description && description->type == FOURCC('a', 'u', 'o', 'u')) {
+        if (description->subtype == FOURCC('a', 'h', 'a', 'l'))
+            hal_component = component;
+        else if (description->subtype == FOURCC('d', 'e', 'f', ' '))
+            def_component = component;
+    }
     if (tracing() && description) {
         char type[8], subtype[8], line[160];
         code(type, description->type);
@@ -604,8 +616,24 @@ static void *t_find(void *after, const ComponentDescription *description) {
 }
 DYLD_INTERPOSE(t_find, AudioComponentFindNext)
 
+static int is_hal_output_component(void *component) {
+    if (!component) return 0;
+    if (component == hal_component || component == def_component) return 1;
+    if (AudioComponentGetDescription) {
+        ComponentDescription desc = {0};
+        if (AudioComponentGetDescription(component, &desc) == NO_ERROR) {
+            if (desc.type == FOURCC('a', 'u', 'o', 'u') &&
+                (desc.subtype == FOURCC('a', 'h', 'a', 'l') ||
+                 desc.subtype == FOURCC('d', 'e', 'f', ' '))) {
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static OSStatus t_new(void *component, void **instance) {
-    if (additions_enabled() && component && component == hal_component && instance) {
+    if (additions_enabled() && component && is_hal_output_component(component) && instance) {
         OutputUnit *unit = calloc(1, sizeof *unit);
         if (unit) {
             unit->magic = UNIT_MAGIC;
@@ -668,8 +696,13 @@ static OSStatus unit_set(OutputUnit *unit, UInt32 id, UInt32 scope, UInt32 eleme
         report_format("output unit set", format);
         if (format->format_id != FOURCC('l', 'p', 'c', 'm'))
             return -10868; /* kAudioUnitErr_FormatNotSupported */
-        if (scope == 1 && element == 0) /* what the client renders */
+        if (scope == 1 && element == 0) { /* what the client renders */
             unit->format = *format;
+            if (unit->scratch) {
+                free(unit->scratch);
+                unit->scratch = 0;
+            }
+        }
         return NO_ERROR;
     }
     case 23: /* SetRenderCallback */
@@ -779,6 +812,7 @@ static OSStatus t_start(void *instance) {
             return -1;
         }
         unit->running = 1;
+        write(2, "[MacOBlox Audio] Output unit started with host FIFO stream\n", 59);
         report("output unit: start (host FIFO)", 0, 0, 0, 0, 1);
         return NO_ERROR;
     }

@@ -4,7 +4,6 @@ use chrono::Local;
 use std::ffi::CString;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -37,10 +36,9 @@ fn spawn_audio_player(bin: &str, is_pipewire: bool, fifo_path: &Path) -> Option<
         cmd.args([
             "--playback", "--raw", "--format", "f32", "--rate", "44100",
             "--channels", "2", "--latency", "40ms", "--media-role", "Game",
-            "-P", "{ application.name = \"Roblox\" application.process.binary = \"crabblox\" media.name = \"Roblox (Crabblox)\" node.name = \"Roblox\" node.latency = 1024/44100 }",
+            "-P", "{ application.name = \"Roblox\" application.icon-name = \"crabblox\" media.name = \"Roblox (Crabblox)\" }",
             fifo_path.to_str()?,
         ]);
-        cmd.env("PIPEWIRE_LATENCY", "1024/44100");
     } else {
         cmd.args([
             "--playback", "--raw", "--format=float32le", "--rate=44100",
@@ -48,7 +46,6 @@ fn spawn_audio_player(bin: &str, is_pipewire: bool, fifo_path: &Path) -> Option<
             "--stream-name=Roblox (Crabblox)", "--property=media.role=game",
             fifo_path.to_str()?,
         ]);
-        cmd.env("PULSE_LATENCY_MSEC", "40");
     }
 
     cmd.stdin(Stdio::null())
@@ -88,8 +85,10 @@ impl HostAudio {
     pub fn start(cache_dir: &std::path::Path) -> Option<Self> {
         let is_pw = Self::is_pipewire_active();
 
-        // Priority depending on whether PipeWire is the active sound server
-        let candidates = if is_pw {
+        // pacat connects seamlessly through pipewire-pulse / pulseaudio with rock-solid buffering.
+        let candidates = if find_binary("pacat").is_some() {
+            vec!["pacat", "pw-cat", "pw-play", "paplay"]
+        } else if is_pw {
             vec!["pw-cat", "pw-play", "pacat", "paplay"]
         } else {
             vec!["pacat", "paplay", "pw-cat", "pw-play"]
@@ -128,20 +127,13 @@ impl HostAudio {
             }
         }
 
-        // Open read-write non-blocking so the writer stays open continuously
-        // without waiting for an external reader (opening O_WRONLY | O_NONBLOCK returns ENXIO on Linux).
+        // Open read-write so the FIFO stays open continuously
+        // without waiting for an external reader.
         let keep_file = fs::OpenOptions::new()
             .read(true)
             .write(true)
-            .custom_flags(libc::O_NONBLOCK)
             .open(&fifo_path)
             .ok()?;
-
-        use std::os::unix::io::AsRawFd;
-        unsafe {
-            // Buffer size ~64KB (~185ms headroom) prevents underruns while keeping latency low
-            let _ = libc::fcntl(keep_file.as_raw_fd(), libc::F_SETPIPE_SZ, 65536);
-        }
 
         let initial_player = spawn_audio_player(player_bin, is_pipewire, &fifo_path)?;
         let player = Arc::new(Mutex::new(Some(initial_player)));
@@ -780,8 +772,6 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         "__GL_SHADER_DISK_CACHE=1".into(),
         format!("__GL_SHADER_DISK_CACHE_PATH={}", home.join(".cache").display()),
         "MACOBLOX_MOUSE_SENSITIVITY=1.00".into(),
-        "PIPEWIRE_LATENCY=256/44100".into(),
-        "PULSE_LATENCY_MSEC=50".into(),
     ];
 
     for (k, v) in &gpu_env.env_vars {
@@ -934,9 +924,6 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         cmd.env("LD_PRELOAD", noroot);
     }
 
-    // PipeWire & PulseAudio latency environment
-    cmd.env("PIPEWIRE_LATENCY", "256/44100");
-    cmd.env("PULSE_LATENCY_MSEC", "50");
 
     // GPU optimizations and PRIME offload variables
     for (k, v) in gpu_env.env_vars {
