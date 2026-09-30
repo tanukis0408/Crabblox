@@ -392,7 +392,6 @@ pub fn detect_gpu_environment() -> GpuEnvironment {
         env_vars.push(("RADV_PERFTEST".into(), "aco".into()));
         env_vars.push(("AMD_VULKAN_ICD".into(), "RADV".into()));
         env_vars.push(("mesa_glthread".into(), "true".into()));
-        env_vars.push(("MESA_LOADER_DRIVER_OVERRIDE".into(), "radeonsi".into()));
         if is_hybrid && !is_nvidia {
             env_vars.push(("DRI_PRIME".into(), "1".into()));
         }
@@ -751,14 +750,6 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
         args.push(format!("MACOBLOX_AUDIO_FIFO=/Volumes/SystemRoot{}", a.fifo_path.display()));
     } else {
         args.push("MACOBLOX_AUDIO=0".into());
-    }
-
-    // Forward Xauthority so X11 and XFixes authenticate properly under Wayland
-    if let Ok(xauth) = std::env::var("XAUTHORITY") {
-        let trimmed = xauth.trim();
-        if !trimmed.is_empty() {
-            args.push(format!("XAUTHORITY=/Volumes/SystemRoot{}", trimmed));
-        }
     }
 
     // Pass deep link launch URL or place ID if provided

@@ -102,27 +102,27 @@ static int read_u16_be(int fd, unsigned short *out) {
 }
 
 static int find_xauth_cookie(int display_num, char *auth_name, int max_name, unsigned char *auth_cookie, int *cookie_len) {
-    const char *candidates[4];
+    const char *candidates[8];
     int count = 0;
     const char *xauth_env = getenv("XAUTHORITY");
     char path_buf[512];
     if (xauth_env && xauth_env[0]) {
-        candidates[count++] = xauth_env;
+        if (count < 8) candidates[count++] = xauth_env;
         if (xauth_env[0] == '/' && strncmp(xauth_env, "/Volumes/SystemRoot", 19) != 0) {
             snprintf(path_buf, sizeof(path_buf), "/Volumes/SystemRoot%s", xauth_env);
-            candidates[count++] = path_buf;
+            if (count < 8) candidates[count++] = path_buf;
         }
     }
     const char *home = getenv("HOME");
     char home_buf[512];
     if (home && home[0]) {
         snprintf(home_buf, sizeof(home_buf), "%s/.Xauthority", home);
-        candidates[count++] = home_buf;
+        if (count < 8) candidates[count++] = home_buf;
     }
     char sys_home_buf[512];
     if (home && home[0] && strncmp(home, "/Volumes/SystemRoot", 19) != 0) {
         snprintf(sys_home_buf, sizeof(sys_home_buf), "/Volumes/SystemRoot%s/.Xauthority", home);
-        candidates[count++] = sys_home_buf;
+        if (count < 8) candidates[count++] = sys_home_buf;
     }
 
     char disp_str[16];

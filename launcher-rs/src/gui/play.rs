@@ -488,7 +488,7 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                                     let diags = runner::scan_crash_diagnostics_with_status(&session.log_path, Some(&status));
                                     let log_tail = if let Ok(content) = std::fs::read_to_string(&session.log_path) {
                                         let lines: Vec<&str> = content.lines().collect();
-                                        let start = lines.len().saturating_sub(8);
+                                        let start = lines.len().saturating_sub(35);
                                         lines[start..].join("\n")
                                     } else {
                                         String::new()
