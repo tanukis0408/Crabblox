@@ -385,6 +385,10 @@ impl FastFlags {
             ("DFFlagUnifiedCookieProtocolEnabled", serde_json::json!("False")),
             ("FFlagUnifiedCookieProtocolEnabledSticky", serde_json::json!("False")),
             ("DFFlagUnifiedCookieProtocolEnabledSticky", serde_json::json!("False")),
+            ("FFlagDebugDisableRbxTransportDummyClient", serde_json::json!("True")),
+            ("DFFlagDebugDisableRbxTransportDummyClient", serde_json::json!("True")),
+            ("FFlagDebugDisableRbxTransportDummyServer", serde_json::json!("True")),
+            ("DFFlagDebugDisableRbxTransportDummyServer", serde_json::json!("True")),
         ];
 
         for (k, v) in compat_flags {

@@ -49,11 +49,19 @@ static int macoblox_connectx(int fd, const sa_endpoints_t *endpoints, unsigned i
         *__error() = EINVAL;
         return -1;
     }
-    if (endpoints->srcaddr && bind(fd, endpoints->srcaddr, endpoints->srcaddrlen) < 0)
-        return -1;
+    if (endpoints->srcaddr) {
+        // If socket is already bound or ephemeral, bind error is non-fatal for connect
+        bind(fd, endpoints->srcaddr, endpoints->srcaddrlen);
+    }
     int result = connect(fd, endpoints->dstaddr, endpoints->dstaddrlen);
-    if (result < 0)
-        return -1;  /* EINPROGRESS for a non-blocking TCP socket, as on macOS */
+    if (result < 0) {
+        int err = *__error();
+        if (err == EINPROGRESS) {
+            if (connid)
+                *connid = 1;
+        }
+        return -1;
+    }
     if (connid)
         *connid = 1;
     if (iov && iovcnt) {

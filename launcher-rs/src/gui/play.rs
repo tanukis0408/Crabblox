@@ -23,7 +23,7 @@ pub fn parse_place_input(raw: &str) -> Result<PlaceJoinInfo, String> {
         if id > 0 {
             return Ok(PlaceJoinInfo {
                 place_id: id,
-                deep_link: format!("roblox://experiences/start?placeId={id}"),
+                deep_link: format!("roblox://placeId={id}"),
                 web_url: format!("https://www.roblox.com/games/{id}"),
             });
         }
@@ -38,7 +38,7 @@ pub fn parse_place_input(raw: &str) -> Result<PlaceJoinInfo, String> {
                 if id > 0 {
                     return Ok(PlaceJoinInfo {
                         place_id: id,
-                        deep_link: format!("roblox://experiences/start?placeId={id}"),
+                        deep_link: format!("roblox://placeId={id}"),
                         web_url: format!("https://www.roblox.com/games/{id}"),
                     });
                 }
@@ -52,7 +52,7 @@ pub fn parse_place_input(raw: &str) -> Result<PlaceJoinInfo, String> {
                 if id > 0 {
                     return Ok(PlaceJoinInfo {
                         place_id: id,
-                        deep_link: format!("roblox://experiences/start?placeId={id}"),
+                        deep_link: format!("roblox://placeId={id}"),
                         web_url: format!("https://www.roblox.com/games/{id}"),
                     });
                 }
@@ -71,7 +71,7 @@ pub fn parse_place_input(raw: &str) -> Result<PlaceJoinInfo, String> {
                     if id > 0 {
                         return Ok(PlaceJoinInfo {
                             place_id: id,
-                            deep_link: format!("roblox://experiences/start?placeId={id}"),
+                            deep_link: format!("roblox://placeId={id}"),
                             web_url: format!("https://www.roblox.com/games/{id}"),
                         });
                     }
@@ -412,8 +412,18 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
             runner::stop_roblox();
         }
 
-        // If Roblox is NOT installed, run install flow!
-        if updater::installed_version(&p).is_none() {
+        // If Roblox is NOT installed or needs updating, run install/update flow!
+        let installed = updater::installed_version(&p);
+        let mut needs_install = installed.is_none();
+        if let Some(ref current_ver) = installed {
+            if let Ok((latest_ver, _)) = updater::latest_version() {
+                if &latest_ver != current_ver {
+                    needs_install = true;
+                }
+            }
+        }
+
+        if needs_install {
             btn.set_sensitive(false);
             btn.set_label("Подключение…");
             let tx_inst = tx.clone();
@@ -452,7 +462,8 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
 
         let tx_clone = tx.clone();
         std::thread::spawn(move || {
-            let rt = match tokio::runtime::Builder::new_current_thread()
+            let rt = match tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
                 .enable_all()
                 .build() {
                 Ok(rt) => rt,
@@ -462,78 +473,78 @@ pub fn build_play_page(window: &adw::ApplicationWindow, paths: Arc<Paths>) -> gt
                 }
             };
 
-            let launch_res = rt.block_on(async {
-                runner::launch(&p).await
-            });
+            rt.block_on(async {
+                let launch_res = runner::launch(&p).await;
 
-            match launch_res {
-                Ok(mut session) => {
-                    let _ = tx_clone.send_blocking(PlayState::Starting);
-                    let mut seen_roblox = false;
-                    let mut last_seen = std::time::Instant::now();
+                match launch_res {
+                    Ok(mut session) => {
+                        let _ = tx_clone.send_blocking(PlayState::Starting);
+                        let mut seen_roblox = false;
+                        let mut last_seen = std::time::Instant::now();
 
-                    loop {
-                        if let Ok(Some(status)) = session.child.try_wait() {
-                            if !seen_roblox && !status.success() {
-                                let diags = runner::scan_crash_diagnostics_with_status(&session.log_path, Some(&status));
-                                let log_tail = if let Ok(content) = std::fs::read_to_string(&session.log_path) {
-                                    let lines: Vec<&str> = content.lines().collect();
-                                    let start = lines.len().saturating_sub(8);
-                                    lines[start..].join("\n")
-                                } else {
-                                    String::new()
-                                };
-                                let mut msg = format!("Roblox завершился с кодом {status}\n");
-                                if !diags.is_empty() {
-                                    msg.push_str("\nОбнаруженная причина сбоя:\n");
-                                    for d in &diags {
-                                        msg.push_str(&format!("• {}\n  {}\n", d.title, d.description));
-                                        if !d.advice.is_empty() {
-                                            msg.push_str("  Рекомендации по устранению:\n");
-                                            for a in &d.advice {
-                                                msg.push_str(&format!("  - {}\n", a));
+                        loop {
+                            if let Ok(Some(status)) = session.child.try_wait() {
+                                if !seen_roblox && !status.success() {
+                                    let diags = runner::scan_crash_diagnostics_with_status(&session.log_path, Some(&status));
+                                    let log_tail = if let Ok(content) = std::fs::read_to_string(&session.log_path) {
+                                        let lines: Vec<&str> = content.lines().collect();
+                                        let start = lines.len().saturating_sub(8);
+                                        lines[start..].join("\n")
+                                    } else {
+                                        String::new()
+                                    };
+                                    let mut msg = format!("Roblox завершился с кодом {status}\n");
+                                    if !diags.is_empty() {
+                                        msg.push_str("\nОбнаруженная причина сбоя:\n");
+                                        for d in &diags {
+                                            msg.push_str(&format!("• {}\n  {}\n", d.title, d.description));
+                                            if !d.advice.is_empty() {
+                                                msg.push_str("  Рекомендации по устранению:\n");
+                                                for a in &d.advice {
+                                                    msg.push_str(&format!("  - {}\n", a));
+                                                }
                                             }
                                         }
                                     }
+                                    if !log_tail.is_empty() {
+                                        msg.push_str(&format!("\nХвост лога:\n{log_tail}"));
+                                    }
+                                    let _ = tx_clone.send_blocking(PlayState::Failed(msg));
+                                } else {
+                                    let _ = tx_clone.send_blocking(PlayState::Stopped);
                                 }
-                                if !log_tail.is_empty() {
-                                    msg.push_str(&format!("\nХвост лога:\n{log_tail}"));
-                                }
-                                let _ = tx_clone.send_blocking(PlayState::Failed(msg));
-                            } else {
-                                let _ = tx_clone.send_blocking(PlayState::Stopped);
-                            }
-                            break;
-                        }
-
-                        let pids = runner::roblox_pids();
-                        if !pids.is_empty() {
-                            if !seen_roblox {
-                                seen_roblox = true;
-                                let _ = tx_clone.send_blocking(PlayState::Playing);
-                            }
-                            last_seen = std::time::Instant::now();
-                        } else if seen_roblox {
-                            if last_seen.elapsed().as_secs() >= 4 {
-                                let _ = session.child.kill();
-                                let _ = session.child.wait();
-                                let _ = tx_clone.send_blocking(PlayState::Stopped);
                                 break;
                             }
+
+                            let pids = runner::roblox_pids();
+                            if !pids.is_empty() {
+                                if !seen_roblox {
+                                    seen_roblox = true;
+                                    let _ = tx_clone.send_blocking(PlayState::Playing);
+                                }
+                                last_seen = std::time::Instant::now();
+                            } else if seen_roblox {
+                                if last_seen.elapsed().as_secs() >= 30 {
+                                    let _ = session.child.kill();
+                                    let _ = session.child.wait();
+                                    let _ = tx_clone.send_blocking(PlayState::Stopped);
+                                    break;
+                                }
+                            }
+
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
                         }
 
-                        std::thread::sleep(std::time::Duration::from_millis(500));
+                        session.dns.stop();
+                        if let Some(ref r) = session.rpc {
+                            r.stop();
+                        }
                     }
-
-                    session.dns.stop();
-                    if let Some(ref r) = session.rpc {
-                        r.stop();
+                    Err(e) => {
+                        let _ = tx_clone.send_blocking(PlayState::Failed(format!("Не удалось запустить:\n{e}")));
                     }
                 }
-                Err(e) => {
-                    let _ = tx_clone.send_blocking(PlayState::Failed(format!("Не удалось запустить:\n{e}")));
-                }
-            }
+            });
         });
     });
     controls_box.append(&play_button);
@@ -857,7 +868,7 @@ mod tests {
     fn test_parse_place_input_direct_id() {
         let res = parse_place_input("1818").unwrap();
         assert_eq!(res.place_id, 1818);
-        assert_eq!(res.deep_link, "roblox://experiences/start?placeId=1818");
+        assert_eq!(res.deep_link, "roblox://placeId=1818");
         assert_eq!(res.web_url, "https://www.roblox.com/games/1818");
 
         let res2 = parse_place_input("  920587237  \n").unwrap();
@@ -868,21 +879,26 @@ mod tests {
     fn test_parse_place_input_roblox_url() {
         let res = parse_place_input("https://www.roblox.com/games/1818/Super-Bomb-Survival").unwrap();
         assert_eq!(res.place_id, 1818);
+        assert_eq!(res.deep_link, "roblox://placeId=1818");
 
         let res2 = parse_place_input("https://roblox.com/games/920587237").unwrap();
         assert_eq!(res2.place_id, 920587237);
+        assert_eq!(res2.deep_link, "roblox://placeId=920587237");
 
         let res3 = parse_place_input("https://www.roblox.com/discover?placeId=654321").unwrap();
         assert_eq!(res3.place_id, 654321);
+        assert_eq!(res3.deep_link, "roblox://placeId=654321");
     }
 
     #[test]
     fn test_parse_place_input_deep_link() {
         let res = parse_place_input("roblox://experiences/start?placeId=1818").unwrap();
         assert_eq!(res.place_id, 1818);
+        assert_eq!(res.deep_link, "roblox://placeId=1818");
 
         let res2 = parse_place_input("roblox-player:1+launchmode:play+placeid:1818").unwrap();
         assert_eq!(res2.place_id, 1818);
+        assert_eq!(res2.deep_link, "roblox://placeId=1818");
 
         let res3 = parse_place_input("roblox://placeId=9999").unwrap();
         assert_eq!(res3.place_id, 9999);

@@ -65,7 +65,7 @@ extern int pthread_attr_getstacksize(const darwin_pthread_attr_t *, unsigned lon
 extern int pthread_attr_getstackaddr(const darwin_pthread_attr_t *, void **);
 extern int pthread_create(void **, const darwin_pthread_attr_t *, void *(*)(void *), void *);
 
-#define MIN_THREAD_STACK (1UL << 20)
+#define MIN_THREAD_STACK (2UL << 20)
 
 static int macoblox_pthread_attr_setstacksize(darwin_pthread_attr_t *attr, unsigned long size) {
     if (size < MIN_THREAD_STACK)

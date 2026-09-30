@@ -28,6 +28,10 @@ enum Commands {
     Gui,
     /// Launch Roblox directly via CLI
     Run {
+        /// Optional place ID or launch URL (e.g. 1818, roblox://placeId=1818)
+        #[arg(value_name = "TARGET")]
+        target: Option<String>,
+
         /// Restart Darling container before launching
         #[arg(long)]
         restart_darling: bool,
@@ -70,9 +74,11 @@ fn main() -> anyhow::Result<()> {
     let _ = fast_flags::FastFlags::ensure_compatibility_flags(&paths);
     let _ = auth::ensure_session_restored(&paths);
 
-    if raw_args.len() > 1 && (raw_args[1].starts_with("roblox-player:") || raw_args[1].starts_with("roblox-studio:")) {
+    if raw_args.len() > 1 && (raw_args[1].starts_with("roblox:") || raw_args[1].starts_with("roblox://") || raw_args[1].starts_with("roblox-player:") || raw_args[1].starts_with("roblox-studio:")) {
         println!("Crabblox received deep link: {}", raw_args[1]);
-        let rt = tokio::runtime::Builder::new_current_thread()
+        std::env::set_var("MACOBLOX_LAUNCH_URL", &raw_args[1]);
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
             .enable_all()
             .build()?;
         return rt.block_on(async {
@@ -86,12 +92,23 @@ fn main() -> anyhow::Result<()> {
         Commands::Gui => {
             gui::run_gui(paths);
         }
-        Commands::Run { restart_darling } => {
+        Commands::Run { target, restart_darling } => {
+            if let Some(t) = target {
+                if t.starts_with("roblox:") || t.starts_with("roblox-player:") {
+                    std::env::set_var("MACOBLOX_LAUNCH_URL", &t);
+                } else if let Ok(id) = t.parse::<u64>() {
+                    std::env::set_var("MACOBLOX_PLACE_ID", id.to_string());
+                    std::env::set_var("MACOBLOX_LAUNCH_URL", format!("roblox://placeId={}", id));
+                } else {
+                    std::env::set_var("MACOBLOX_LAUNCH_URL", &t);
+                }
+            }
             if restart_darling {
                 println!("Restarting Darling container daemon...");
                 runner::restart_darling(&paths.darling_prefix);
             }
-            let rt = tokio::runtime::Builder::new_current_thread()
+            let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
                 .enable_all()
                 .build()?;
             rt.block_on(async {
@@ -206,6 +223,15 @@ async fn run_roblox(paths: Arc<Paths>) -> anyhow::Result<()> {
         updater::update_roblox(&paths, &upload, |frac, msg| {
             println!("[{:.0}%] {}", frac * 100.0, msg);
         })?;
+    } else if let Ok((latest_ver, upload)) = updater::latest_version() {
+        if latest_ver != ver {
+            println!("A newer Roblox version is available: {} (installed: {}). Updating...", latest_ver, ver);
+            if let Err(e) = updater::update_roblox(&paths, &upload, |frac, msg| {
+                println!("[{:.0}%] {}", frac * 100.0, msg);
+            }) {
+                eprintln!("Warning: Failed to auto-update Roblox: {e}");
+            }
+        }
     }
 
     println!("Starting local DNS forwarder and launching Roblox...");
@@ -213,11 +239,8 @@ async fn run_roblox(paths: Arc<Paths>) -> anyhow::Result<()> {
     println!("Roblox launched successfully! PID: {}", session.child.id());
     println!("Log file: {:?}", session.log_path);
 
-    let status = session.child.wait()?;
+    let status = session.wait_async().await?;
     session.dns.stop();
     println!("Roblox exited with status: {}", status);
-    if !status.success() {
-        runner::scan_crash_diagnostics_with_status(&session.log_path, Some(&status));
-    }
     Ok(())
 }

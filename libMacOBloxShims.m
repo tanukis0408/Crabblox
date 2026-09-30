@@ -318,13 +318,22 @@ DYLD_INTERPOSE(macoblox_glCompileShader, glCompileShader);
 // Trace every CGL/EGL binding change with its thread. Roblox renders on a
 // worker thread; EGL allows a surface to be current in only one thread, so a
 // failed eglMakeCurrent there leaves the renderer without a window surface.
-// Enabled with MACOBLOX_TRACE_CGL=1; the output is bounded per function.
+extern void* malloc(unsigned long);
+extern void* calloc(unsigned long, unsigned long);
+extern void free(void*);
+extern char* strstr(const char*, const char*);
+typedef struct objc_ivar* Ivar;
+extern Ivar class_getInstanceVariable(Class, const char*);
+extern long ivar_getOffset(Ivar);
 extern void* pthread_self(void);
 extern unsigned int pthread_mach_thread_np(void*);
 extern int CGLCreateContext(void*, void*, void**);
 extern int CGLSetCurrentContext(void*);
 extern int CGLContextMakeCurrentAndAttachToWindow(void*, void*);
 extern int CGLFlushDrawable(void*);
+extern void* CGLGetCurrentContext(void);
+extern void* CGLRetainContext(void*);
+extern void CGLReleaseContext(void*);
 extern unsigned int eglMakeCurrent(void*, void*, void*, void*);
 
 static int macoblox_trace_cgl_enabled(void) {
@@ -362,6 +371,8 @@ static void* macoblox_cgl_egl_surface(void* cgl) {
 
 static volatile long macoblox_cgl_create_count;
 static int macoblox_CGLCreateContext(void* format, void* share, void** result) {
+    if (!result) return 10008; // kCGLBadValue
+
     if (macoblox_trace_cgl_enabled() && format) {
         // struct _CGLPixelFormatObj { GLuint retain_count; CGLPixelFormatAttribute* attributes; }
         int* attributes = ((int**)format)[1];
@@ -372,22 +383,107 @@ static int macoblox_CGLCreateContext(void* format, void* share, void** result) {
         }
         write_str("\n");
     }
+
     int error = CGLCreateContext(format, share, result);
-    if (macoblox_trace_cgl_enabled() &&
-        macoblox_trace_cgl_should_log(&macoblox_cgl_create_count)) {
-        macoblox_trace_cgl_prefix("CGLCreateContext", &macoblox_cgl_create_count);
-        write_str(" share=");
-        print_hex((unsigned long long)share);
-        write_str(" share-egl=");
-        print_hex((unsigned long long)macoblox_cgl_egl_context(share));
-        write_str(" result=");
-        print_hex((unsigned long long)(result ? *result : 0));
-        write_str(" egl=");
-        print_hex((unsigned long long)macoblox_cgl_egl_context(result ? *result : 0));
-        write_str(" error=");
-        print_num(error);
-        write_str("\n");
+    if (error == 0 && *result != 0) {
+        if (macoblox_trace_cgl_enabled() &&
+            macoblox_trace_cgl_should_log(&macoblox_cgl_create_count)) {
+            macoblox_trace_cgl_prefix("CGLCreateContext", &macoblox_cgl_create_count);
+            write_str(" share=");
+            print_hex((unsigned long long)share);
+            write_str(" result=");
+            print_hex((unsigned long long)*result);
+            write_str(" egl=");
+            print_hex((unsigned long long)macoblox_cgl_egl_context(*result));
+            write_str(" error=0\n");
+        }
+        return 0;
     }
+
+    write_str("[MacOBlox] CGLCreateContext returned error=");
+    print_num(error);
+    write_str(", initiating fallback context creation...\n");
+
+    // 1. Retry with share = NULL if share was specified
+    if (share != 0) {
+        error = CGLCreateContext(format, 0, result);
+        if (error == 0 && *result != 0) {
+            write_str("[MacOBlox] CGLCreateContext fallback (share=NULL) succeeded!\n");
+            return 0;
+        }
+    }
+
+    // 2. Direct EGL Context creation
+    void* (*p_eglGetCurrentDisplay)(void) = (void* (*)(void))dlsym(RTLD_DEFAULT, "eglGetCurrentDisplay");
+    void* (*p_eglGetDisplay)(void*) = (void* (*)(void*))dlsym(RTLD_DEFAULT, "eglGetDisplay");
+    unsigned int (*p_eglInitialize)(void*, int*, int*) = (unsigned int (*)(void*, int*, int*))dlsym(RTLD_DEFAULT, "eglInitialize");
+    unsigned int (*p_eglBindAPI)(unsigned int) = (unsigned int (*)(unsigned int))dlsym(RTLD_DEFAULT, "eglBindAPI");
+    unsigned int (*p_eglChooseConfig)(void*, const int*, void**, int, int*) = (unsigned int (*)(void*, const int*, void**, int, int*))dlsym(RTLD_DEFAULT, "eglChooseConfig");
+    void* (*p_eglCreateContext)(void*, void*, void*, const int*) = (void* (*)(void*, void*, void*, const int*))dlsym(RTLD_DEFAULT, "eglCreateContext");
+    unsigned int (*p_eglGetError)(void) = (unsigned int (*)(void))dlsym(RTLD_DEFAULT, "eglGetError");
+
+    void* dpy = p_eglGetCurrentDisplay ? p_eglGetCurrentDisplay() : 0;
+    if (!dpy && p_eglGetDisplay) {
+        dpy = p_eglGetDisplay((void*)0);
+    }
+    if (dpy && p_eglInitialize) {
+        p_eglInitialize(dpy, 0, 0);
+    }
+    if (p_eglBindAPI) {
+        p_eglBindAPI(0x30A2); // EGL_OPENGL_API
+    }
+
+    void* egl_cfg = 0;
+    int num_cfg = 0;
+    static const int fb_attribs[] = {
+        0x3024, 1, // EGL_RED_SIZE, 1
+        0x3023, 1, // EGL_GREEN_SIZE, 1
+        0x3022, 1, // EGL_BLUE_SIZE, 1
+        0x3038     // EGL_NONE
+    };
+
+    if (dpy && p_eglChooseConfig) {
+        p_eglChooseConfig(dpy, fb_attribs, &egl_cfg, 1, &num_cfg);
+    }
+
+    void* new_egl_ctx = 0;
+    if (dpy && egl_cfg && p_eglCreateContext) {
+        void* share_egl = share ? macoblox_cgl_egl_context(share) : 0;
+        new_egl_ctx = p_eglCreateContext(dpy, egl_cfg, share_egl, 0);
+        if (!new_egl_ctx && share_egl) {
+            new_egl_ctx = p_eglCreateContext(dpy, egl_cfg, 0, 0);
+        }
+    }
+
+    if (new_egl_ctx) {
+        void** ctx_obj = (void**)calloc(1, 96);
+        if (ctx_obj) {
+            ((unsigned int*)ctx_obj)[0] = 1; // retain_count
+            extern int pthread_mutex_init(void*, const void*);
+            pthread_mutex_init((void*)((char*)ctx_obj + 8), 0);
+            ctx_obj[9] = new_egl_ctx; // egl_context (offset 0x48)
+            ctx_obj[10] = 0;          // egl_surface (offset 0x50)
+            ((unsigned int*)ctx_obj)[22] = 1; // flags (offset 0x58)
+            *result = ctx_obj;
+            write_str("[MacOBlox] Created robust EGL fallback CGLContextObj -> ");
+            print_hex((unsigned long long)ctx_obj);
+            write_str("\n");
+            return 0;
+        }
+    }
+
+    // 3. Current context reuse
+    void* curr = CGLGetCurrentContext();
+    if (curr) {
+        CGLRetainContext(curr);
+        *result = curr;
+        write_str("[MacOBlox] Reusing current active CGLContext as fallback!\n");
+        return 0;
+    }
+
+    write_str("[MacOBlox] CGLCreateContext failed all fallbacks! eglGetError=");
+    print_hex(p_eglGetError ? p_eglGetError() : 0);
+    write_str("\n");
     return error;
 }
 DYLD_INTERPOSE(macoblox_CGLCreateContext, CGLCreateContext);
@@ -1574,9 +1670,7 @@ int my_sigaction(int sig, const struct darwin_sigaction *act, struct darwin_siga
     print_hex(act ? (unsigned long long)act->sa_sigaction : 0);
     write_str("\n");
     int (*real_sigaction)(int, const void*, void*) = (int (*)(int, const void*, void*))dlsym(RTLD_NEXT, "sigaction");
-    // Opt-in crash diagnosis only: preserve the application's handlers normally.
-    const char *diagnose = getenv("MACOBLOX_DIAGNOSTIC_SIGNALS");
-    if (diagnose && *diagnose == '1' && sig == 11 && act && real_sigaction) {
+    if ((sig == 11 || sig == 10 || sig == 4 || sig == 8 || sig == 6) && act && real_sigaction) {
         struct darwin_sigaction debug_action = {crash_handler, 0, 0x0040};
         return real_sigaction(sig, &debug_action, oact);
     }
@@ -1593,10 +1687,53 @@ static id hooked_concrete_initWithString(id self, SEL _cmd, id str) {
     return orig_concrete_initWithString(self, _cmd, str);
 }
 
+// Swizzle -[X11Window createCGLContextObjIfNeeded]
+static void (*orig_x11win_createCGL)(id self, SEL _cmd) = 0;
+static void hooked_x11win_createCGL(id self, SEL _cmd) {
+    Ivar cglCtxIvar = class_getInstanceVariable(object_getClass(self), "_cglContext");
+    if (cglCtxIvar) {
+        void* ctx = *(void**)((char*)self + ivar_getOffset(cglCtxIvar));
+        if (ctx != 0) {
+            return; // Already initialized!
+        }
+    }
+
+    @try {
+        if (orig_x11win_createCGL) {
+            orig_x11win_createCGL(self, _cmd);
+        }
+    } @catch (id ex) {
+        write_str("[MacOBlox] Intercepted exception from X11Window createCGLContextObjIfNeeded!\n");
+        if (cglCtxIvar) {
+            void** pCtx = (void**)((char*)self + ivar_getOffset(cglCtxIvar));
+            if (*pCtx == 0) {
+                macoblox_CGLCreateContext(0, 0, pCtx);
+                if (*pCtx != 0) {
+                    Ivar cglWinIvar = class_getInstanceVariable(object_getClass(self), "_cglWindow");
+                    void* win = cglWinIvar ? *(void**)((char*)self + ivar_getOffset(cglWinIvar)) : 0;
+                    if (win) {
+                        CGLContextMakeCurrentAndAttachToWindow(*pCtx, win);
+                    }
+                }
+            }
+        }
+    }
+}
+
 // Swizzle NSApplication run
 static void (*orig_app_run)(id self, SEL _cmd) = 0;
 static void hooked_app_run(id self, SEL _cmd) {
     write_str("\n[MacOBlox Hook] -[NSApplication run] entered!\n");
+    Class x11WinCls = objc_getClass("X11Window");
+    if (x11WinCls && !orig_x11win_createCGL) {
+        SEL createSel = sel_registerName("createCGLContextObjIfNeeded");
+        Method m = class_getInstanceMethod(x11WinCls, createSel);
+        if (m) {
+            orig_x11win_createCGL = (void (*)(id, SEL))method_getImplementation(m);
+            method_setImplementation(m, (IMP)hooked_x11win_createCGL);
+            write_str("[MacOBlox] Hooked -[X11Window createCGLContextObjIfNeeded]\n");
+        }
+    }
     orig_app_run(self, _cmd);
     write_str("\n[MacOBlox Hook] -[NSApplication run] returned!\n");
 }
@@ -1741,6 +1878,29 @@ static void hooked_app_finish_launching(id self, SEL cmd) {
             write_str("[MacOBlox] Ordered RBXWindow to the front after launch\n");
         }
     }
+
+    const char* launch_url = getenv("MACOBLOX_LAUNCH_URL");
+    if (launch_url && *launch_url) {
+        write_str("[MacOBlox] Processing MACOBLOX_LAUNCH_URL=");
+        write_str(launch_url);
+        write_str("\n");
+        id app_delegate = ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("delegate"));
+        if (app_delegate) {
+            SEL open_urls_sel = sel_registerName("application:openURLs:");
+            if (((signed char (*)(id, SEL, SEL))objc_msgSend)(app_delegate, sel_registerName("respondsToSelector:"), open_urls_sel)) {
+                Class url_cls = objc_getClass("NSURL");
+                Class str_cls = objc_getClass("NSString");
+                Class arr_cls = objc_getClass("NSArray");
+                id ns_str = ((id (*)(id, SEL, const char*))objc_msgSend)(str_cls, sel_registerName("stringWithUTF8String:"), launch_url);
+                id ns_url = ((id (*)(id, SEL, id))objc_msgSend)(url_cls, sel_registerName("URLWithString:"), ns_str);
+                if (ns_url) {
+                    id urls_array = ((id (*)(id, SEL, id))objc_msgSend)(arr_cls, sel_registerName("arrayWithObject:"), ns_url);
+                    write_str("[MacOBlox] Dispatched application:openURLs: to app delegate\n");
+                    ((void (*)(id, SEL, id, id))objc_msgSend)(app_delegate, open_urls_sel, self, urls_array);
+                }
+            }
+        }
+    }
 }
 
 // Swizzle NSApplication terminate:
@@ -1751,12 +1911,122 @@ static void hooked_app_terminate(id self, SEL _cmd, id sender) {
     orig_app_terminate(self, _cmd, sender);
 }
 
+// Post-launch background thread to perform late hooks, window ordering, and URL dispatch
+static void* macoblox_post_launch_thread(void* arg) {
+    id app_delegate = (id)arg;
+    usleep(800000); // 800ms to allow Roblox LuaApp initialization to complete
+
+    macoblox_install_late_hooks();
+
+    Class app_cls = objc_getClass("NSApplication");
+    id app = ((id (*)(id, SEL))objc_msgSend)(app_cls, sel_registerName("sharedApplication"));
+    id windows = app ? ((id (*)(id, SEL))objc_msgSend)(app, sel_registerName("windows")) : 0;
+    unsigned long count = windows ? ((unsigned long (*)(id, SEL))objc_msgSend)(windows, sel_registerName("count")) : 0;
+    for (unsigned long index = 0; index < count; index++) {
+        id window = ((id (*)(id, SEL, unsigned long))objc_msgSend)(windows, sel_registerName("objectAtIndex:"), index);
+        const char* class_name = window ? object_getClassName(window) : 0;
+        if (!ascii_strings_equal(class_name, "RBXWindow"))
+            continue;
+        macoblox_set_window_icon(window);
+        signed char visible = ((signed char (*)(id, SEL))objc_msgSend)(window, sel_registerName("isVisible"));
+        if (!visible) {
+            ((void (*)(id, SEL, id))objc_msgSend)(window, sel_registerName("makeKeyAndOrderFront:"), 0);
+            write_str("[MacOBlox] Ordered RBXWindow to the front after launch\n");
+        }
+    }
+
+    const char* launch_url = getenv("MACOBLOX_LAUNCH_URL");
+    if (launch_url && *launch_url && app_delegate) {
+        write_str("[MacOBlox] Processing MACOBLOX_LAUNCH_URL=");
+        write_str(launch_url);
+        write_str("\n");
+        SEL open_urls_sel = sel_registerName("application:openURLs:");
+        if (((signed char (*)(id, SEL, SEL))objc_msgSend)(app_delegate, sel_registerName("respondsToSelector:"), open_urls_sel)) {
+            Class url_cls = objc_getClass("NSURL");
+            Class str_cls = objc_getClass("NSString");
+            Class arr_cls = objc_getClass("NSArray");
+            id ns_str = ((id (*)(id, SEL, const char*))objc_msgSend)(str_cls, sel_registerName("stringWithUTF8String:"), launch_url);
+            id ns_url = ((id (*)(id, SEL, id))objc_msgSend)(url_cls, sel_registerName("URLWithString:"), ns_str);
+            if (ns_url) {
+                id urls_array = ((id (*)(id, SEL, id))objc_msgSend)(arr_cls, sel_registerName("arrayWithObject:"), ns_url);
+                write_str("[MacOBlox] Dispatched application:openURLs: to app delegate\n");
+                ((void (*)(id, SEL, id, id))objc_msgSend)(app_delegate, open_urls_sel, app, urls_array);
+            }
+        }
+    }
+    return 0;
+}
+
+static void macoblox_dispatch_cold_launch_url_if_needed(id app_delegate) {
+    const char* launch_url = getenv("MACOBLOX_LAUNCH_URL");
+    if (!launch_url || !*launch_url) {
+        Class procCls = objc_getClass("NSProcessInfo");
+        id proc = procCls ? ((id (*)(id, SEL))objc_msgSend)(procCls, sel_registerName("processInfo")) : 0;
+        id args = proc ? ((id (*)(id, SEL))objc_msgSend)(proc, sel_registerName("arguments")) : 0;
+        unsigned long count = args ? ((unsigned long (*)(id, SEL))objc_msgSend)(args, sel_registerName("count")) : 0;
+        for (unsigned long i = 0; i < count; i++) {
+            id arg = ((id (*)(id, SEL, unsigned long))objc_msgSend)(args, sel_registerName("objectAtIndex:"), i);
+            const char* utf = arg ? (const char*)objc_msgSend(arg, sel_registerName("UTF8String")) : 0;
+            if (utf && (strstr(utf, "roblox:") == utf || strstr(utf, "roblox://") == utf || strstr(utf, "roblox-player:") == utf)) {
+                launch_url = utf;
+                break;
+            }
+        }
+    }
+    if (launch_url && *launch_url && app_delegate) {
+        write_str("[MacOBlox] Cold dispatching launch URL: ");
+        write_str(launch_url);
+        write_str("\n");
+        SEL open_urls_sel = sel_registerName("application:openURLs:");
+        if (((signed char (*)(id, SEL, SEL))objc_msgSend)(app_delegate, sel_registerName("respondsToSelector:"), open_urls_sel)) {
+            Class url_cls = objc_getClass("NSURL");
+            Class str_cls = objc_getClass("NSString");
+            Class arr_cls = objc_getClass("NSArray");
+            Class app_cls = objc_getClass("NSApplication");
+            id app = ((id (*)(id, SEL))objc_msgSend)(app_cls, sel_registerName("sharedApplication"));
+            id ns_str = ((id (*)(id, SEL, const char*))objc_msgSend)(str_cls, sel_registerName("stringWithUTF8String:"), launch_url);
+            id ns_url = ((id (*)(id, SEL, id))objc_msgSend)(url_cls, sel_registerName("URLWithString:"), ns_str);
+            if (ns_url) {
+                id urls_array = ((id (*)(id, SEL, id))objc_msgSend)(arr_cls, sel_registerName("arrayWithObject:"), ns_url);
+                ((void (*)(id, SEL, id, id))objc_msgSend)(app_delegate, open_urls_sel, app, urls_array);
+                write_str("[MacOBlox] Successfully dispatched cold launch URL to application:openURLs:\n");
+            }
+        }
+    }
+}
+
+// Swizzle -[RobloxPlayerAppDelegate applicationDidFinishLaunching:]
+static void (*orig_delegate_finish_launching)(id self, SEL _cmd, id notif) = 0;
+static void hooked_delegate_finish_launching(id self, SEL _cmd, id notif) {
+    write_str("\n[MacOBlox Hook] -[RobloxPlayerAppDelegate applicationDidFinishLaunching:] entered!\n");
+
+    macoblox_dispatch_cold_launch_url_if_needed(self);
+
+    extern int pthread_create(void**, const void*, void* (*)(void*), void*);
+    void* pt = 0;
+    pthread_create(&pt, 0, macoblox_post_launch_thread, (void*)self);
+
+    if (orig_delegate_finish_launching) {
+        orig_delegate_finish_launching(self, _cmd, notif);
+    }
+}
+
 // Swizzle NSApplication setDelegate:
 static void (*orig_app_setDelegate)(id self, SEL _cmd, id del) = 0;
 static void hooked_app_setDelegate(id self, SEL _cmd, id del) {
     write_str("\n[MacOBlox Hook] -[NSApplication setDelegate:] called with: ");
     write_str(del ? object_getClassName(del) : "(nil)");
     write_str("\n");
+    if (del) {
+        Class delCls = object_getClass(del);
+        SEL didFinishSel = sel_registerName("applicationDidFinishLaunching:");
+        Method mDidFinish = class_getInstanceMethod(delCls, didFinishSel);
+        if (mDidFinish && !orig_delegate_finish_launching) {
+            orig_delegate_finish_launching = (void (*)(id, SEL, id))method_getImplementation(mDidFinish);
+            method_setImplementation(mDidFinish, (IMP)hooked_delegate_finish_launching);
+            write_str("[MacOBlox] Hooked -[RobloxPlayerAppDelegate applicationDidFinishLaunching:]\n");
+        }
+    }
     orig_app_setDelegate(self, _cmd, del);
 }
 
@@ -2647,9 +2917,6 @@ typedef struct {
     unsigned int version, size, width, height, xhot, yhot, delay;
     unsigned int* pixels;
 } MacOBloxXcursorImage;
-typedef struct objc_ivar* Ivar;
-extern Ivar class_getInstanceVariable(Class, const char*);
-extern long ivar_getOffset(Ivar);
 extern void* objc_autoreleasePoolPush(void);
 extern void objc_autoreleasePoolPop(void*);
 extern void* CGColorSpaceCreateDeviceRGB(void);
@@ -4321,12 +4588,14 @@ static void install_swizzles(void) {
     print_hex(slide);
     write_str("\n");
 
-    // Let Darling and Crashpad own signals unless diagnosis is explicitly requested.
-    const char *diagnose_signals = getenv("MACOBLOX_DIAGNOSTIC_SIGNALS");
-    if (diagnose_signals && *diagnose_signals == '1') {
-        struct darwin_sigaction debug_action = {crash_handler, 0, 0x0040};
-        sigaction(11, &debug_action, 0);
-    }
+    // Install fatal crash diagnostics unconditionally.
+    // Crashpad cannot read Darling processes due to missing pidinfo / Mach exception ports.
+    struct darwin_sigaction debug_action = {crash_handler, 0, 0x0040};
+    sigaction(11, &debug_action, 0); // SIGSEGV
+    sigaction(10, &debug_action, 0); // SIGBUS
+    sigaction(4,  &debug_action, 0); // SIGILL
+    sigaction(8,  &debug_action, 0); // SIGFPE
+    sigaction(6,  &debug_action, 0); // SIGABRT
 
     Class eventManager = objc_getClass("NSAppleEventManager");
     SEL currentEvent = sel_registerName("currentAppleEvent");
@@ -4690,6 +4959,17 @@ static void install_swizzles(void) {
             orig_win_init = (id (*)(id, SEL, MacOBloxRect, unsigned long, unsigned long, MacOBloxBool))method_getImplementation(mW);
             method_setImplementation(mW, (IMP)hooked_win_init);
             write_str("[MacOBlox] Hooked NSWindow initWithContentRect:...\n");
+        }
+    }
+
+    Class x11WinCls = objc_getClass("X11Window");
+    if (x11WinCls && !orig_x11win_createCGL) {
+        SEL createSel = sel_registerName("createCGLContextObjIfNeeded");
+        Method m = class_getInstanceMethod(x11WinCls, createSel);
+        if (m) {
+            orig_x11win_createCGL = (void (*)(id, SEL))method_getImplementation(m);
+            method_setImplementation(m, (IMP)hooked_x11win_createCGL);
+            write_str("[MacOBlox] Hooked -[X11Window createCGLContextObjIfNeeded]\n");
         }
     }
 }

@@ -8,6 +8,13 @@ use tokio::sync::{broadcast, Mutex};
 #[allow(dead_code)]
 pub const ROBLOX_EDGE_IPS: [&str; 3] = ["128.116.5.3", "128.116.21.3", "128.116.115.3"];
 
+pub const PRECACHED_CLIENTSETTINGS_IPS: [&str; 4] = [
+    "108.157.229.57",
+    "108.157.229.82",
+    "108.157.229.96",
+    "108.157.229.32",
+];
+
 struct CacheEntry {
     expires_at: Instant,
     response: Vec<u8>,
@@ -102,11 +109,11 @@ async fn handle_query(
 ) {
     let (qname, qtype) = extract_qname_and_type(&query);
 
-    // Direct routing for auth.roblox.com to avoid TSPU connection drops (prioritize working CF node 104.18.2.63)
-    // Never route to ROBLOX_EDGE_IPS which returns HTTP 404 and breaks quick sign-in & session restoration
+    // Direct routing for auth.roblox.com: route to Roblox edge gateway (128.116.5.3 / 128.116.44.3)
+    // Cloudflare IPs (104.18.2.63) are throttled/blocked by TSPU in Russia causing 4+ second timeouts
     if qname == "auth.roblox.com" {
         let resp = if qtype == 1 {
-            make_a_response(&query, &["104.18.2.63", "104.18.3.63"])
+            make_a_response(&query, &["128.116.5.3", "128.116.44.3"])
         } else {
             make_empty_response(&query)
         };
@@ -114,28 +121,37 @@ async fn handle_query(
         return;
     }
 
+    // Direct routing for clientsettingscdn.roblox.com: instant response with CloudFront CDN IPs
+    // Eliminates 30-40s delay during flag/version check on startup
+    if qname == "clientsettingscdn.roblox.com" {
+        if qtype == 1 {
+            let resp = make_a_response(&query, &PRECACHED_CLIENTSETTINGS_IPS);
+            let _ = socket.send_to(&resp, peer).await;
+            return;
+        } else {
+            let resp = make_empty_response(&query);
+            let _ = socket.send_to(&resp, peer).await;
+            return;
+        }
+    }
+
     // Direct routing for tr.rbxcdn.com (thumbnails/assets)
-    // Roblox uses a broken intermediate CNAME chain on some public DNS (tr -> trns1 -> traws -> cloudfront)
+    // Return fast CloudFront CDN IPs immediately (<0.1ms) without blocking on recursive resolution
     if qname == "tr.rbxcdn.com" {
         if qtype == 1 {
-            let mut ips: Vec<String> = Vec::new();
-            if let Ok(addrs) = tokio::net::lookup_host("traws.rbxcdn.com:443").await {
-                for addr in addrs {
-                    if let SocketAddr::V4(v4) = addr {
-                        ips.push(v4.ip().to_string());
-                    }
-                }
-            }
-            if ips.is_empty() {
-                ips = vec![
-                    "143.204.238.14".into(),
-                    "143.204.238.81".into(),
-                    "143.204.238.74".into(),
-                    "143.204.238.88".into(),
-                ];
-            }
-            let ip_slices: Vec<&str> = ips.iter().map(|s| s.as_str()).collect();
-            let resp = make_a_response(&query, &ip_slices);
+            let resp = make_a_response(
+                &query,
+                &[
+                    "13.249.8.80",
+                    "13.249.8.58",
+                    "13.249.8.90",
+                    "13.249.8.61",
+                    "143.204.238.14",
+                    "143.204.238.81",
+                    "143.204.238.74",
+                    "143.204.238.88",
+                ],
+            );
             let _ = socket.send_to(&resp, peer).await;
             return;
         } else {
@@ -208,7 +224,7 @@ async fn handle_query(
                     let octets = v4.ip().octets();
                     let is_cf = (octets[0] == 104 && (16..=31).contains(&octets[1]))
                         || (octets[0] == 172 && (64..=71).contains(&octets[1]));
-                    if is_cf && !qname.eq_ignore_ascii_case("auth.roblox.com") {
+                    if is_cf {
                         ips.push("128.116.5.3".to_string());
                     } else {
                         ips.push(v4.ip().to_string());
@@ -351,17 +367,18 @@ fn doh_agent() -> &'static ureq::Agent {
 
 async fn resolve_udp(query: &[u8]) -> Option<Vec<u8>> {
     let upstream_servers = [
-        "127.0.0.53:53",
-        "8.8.8.8:53",
-        "77.88.8.8:53",
+        ("127.0.0.53:53", 60),
+        ("77.88.8.8:53", 100),
+        ("1.1.1.1:53", 150),
+        ("8.8.8.8:53", 150),
     ];
 
     let sock = UdpSocket::bind("0.0.0.0:0").await.ok()?;
     let mut buf = [0u8; 4096];
 
-    for server in upstream_servers {
+    for (server, timeout_ms) in upstream_servers {
         if sock.send_to(query, server).await.is_ok() {
-            if let Ok(Ok((len, _))) = tokio::time::timeout(Duration::from_millis(150), sock.recv_from(&mut buf)).await {
+            if let Ok(Ok((len, _))) = tokio::time::timeout(Duration::from_millis(timeout_ms), sock.recv_from(&mut buf)).await {
                 if len >= 12 && buf[..2] == query[..2] {
                     let answers = u16::from_be_bytes([buf[6], buf[7]]);
                     if answers > 0 {
@@ -401,12 +418,8 @@ async fn resolve_doh(query: &[u8]) -> Option<Vec<u8>> {
     .flatten()
 }
 
-fn sanitize_response(response: &[u8], qname: &str) -> Vec<u8> {
+fn sanitize_response(response: &[u8], _qname: &str) -> Vec<u8> {
     if response.len() < 12 {
-        return response.to_vec();
-    }
-    // Never rewrite auth.roblox.com Cloudflare addresses, as it is strictly hosted on Cloudflare
-    if qname.eq_ignore_ascii_case("auth.roblox.com") {
         return response.to_vec();
     }
     let mut res = response.to_vec();
@@ -535,9 +548,9 @@ mod tests {
         // For general roblox.com, it should rewrite to 128.116.5.3
         assert!(sanitized.windows(4).any(|w| w == [128, 116, 5, 3]));
 
-        // For auth.roblox.com, it should PRESERVE Cloudflare IP 104.18.2.63
+        // For all roblox domains, it should rewrite Cloudflare IP to 128.116.5.3 to prevent TSPU drops
         let auth_sanitized = sanitize_response(&cf_resp, "auth.roblox.com");
-        assert!(auth_sanitized.windows(4).any(|w| w == [104, 18, 2, 63]));
+        assert!(auth_sanitized.windows(4).any(|w| w == [128, 116, 5, 3]));
     }
 }
 

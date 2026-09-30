@@ -12,7 +12,10 @@ const LAUNCH_SCRIPT: &str = r#"
 app_dir=$1 shim_dir=$2; shift 2
 extra_args=()
 for kv in "$@"; do
-    if [[ "$kv" == --* ]] || [[ "$kv" == roblox-player:* ]]; then
+    if [[ "$kv" == roblox:* ]] || [[ "$kv" == roblox://* ]] || [[ "$kv" == roblox-player:* ]]; then
+        export MACOBLOX_LAUNCH_URL="$kv"
+        extra_args+=("$kv")
+    elif [[ "$kv" == --* ]]; then
         extra_args+=("$kv")
     else
         export "$kv"
@@ -168,6 +171,19 @@ impl RobloxSession {
             self.diagnostics_performed = true;
         }
         Ok(status)
+    }
+
+    pub async fn wait_async(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        loop {
+            if let Some(status) = self.child.try_wait()? {
+                if !status.success() && !self.diagnostics_performed {
+                    scan_crash_diagnostics_with_status(&self.log_path, Some(&status));
+                    self.diagnostics_performed = true;
+                }
+                return Ok(status);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
     }
 
     pub fn scan_diagnostics(&mut self) -> Vec<CrashDiagnosis> {
@@ -486,7 +502,6 @@ pub fn roblox_pids() -> Vec<i32> {
                     let cmd = String::from_utf8_lossy(&bytes);
                     if cmd.contains("RobloxPlayer")
                         && !cmd.contains("RobloxCrashHandler")
-                        && !cmd.contains("darling shell")
                         && !cmd.contains("crabblox")
                     {
                         pids.push(pid);
@@ -512,7 +527,6 @@ pub fn all_roblox_pids() -> Vec<i32> {
                 if let Ok(bytes) = fs::read(cmdline) {
                     let cmd = String::from_utf8_lossy(&bytes);
                     if (cmd.contains("RobloxPlayer") || cmd.contains("RobloxCrashHandler"))
-                        && !cmd.contains("darling shell")
                         && !cmd.contains("crabblox")
                     {
                         pids.push(pid);
@@ -690,6 +704,15 @@ pub async fn launch(paths: &Paths) -> anyhow::Result<RobloxSession> {
     if let Ok(url) = std::env::var("MACOBLOX_LAUNCH_URL") {
         if !url.trim().is_empty() {
             args.push(url.trim().to_string());
+        }
+    }
+    if let Ok(place_id) = std::env::var("MACOBLOX_PLACE_ID") {
+        let trimmed = place_id.trim();
+        if !trimmed.is_empty() {
+            if std::env::var("MACOBLOX_LAUNCH_URL").is_err() {
+                args.push(format!("roblox://placeId={}", trimmed));
+            }
+            args.push(format!("--id={}", trimmed));
         }
     }
 
