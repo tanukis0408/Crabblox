@@ -30,6 +30,7 @@ extern int pthread_create(void **, const void *, void *(*)(void *), void *);
 extern unsigned int sleep(unsigned int);
 extern int snprintf(char *, size_t, const char *, ...);
 extern ssize_t write(int, const void *, size_t);
+extern int close(int);
 extern int *__error(void);
 
 #define DYLD_INTERPOSE(_replacement, _replacee) \
@@ -592,3 +593,27 @@ static int traced_kevent(int queue, const void *changes, int change_count, void 
     }
 }
 DYLD_INTERPOSE(traced_kevent, kevent)
+
+extern void *dlsym(void *, const char *);
+
+static int traced_close(int fd) {
+    if (fd >= 0 && fd < 1024) {
+        reader_thread[fd] = 0;
+        last_read_time[fd] = 0;
+        stall_dumped[fd] = 0;
+        synthesized_by_fd[fd] = 0;
+        lock_watched();
+        for (int i = 0; i < MAX_WATCHED; i++) {
+            if (watched[i].fd == fd) {
+                watched[i].fd = 0;
+                watched[i].enabled = 0;
+            }
+        }
+        unlock_watched();
+    }
+    static int (*real_close)(int) = 0;
+    if (!real_close)
+        real_close = (int (*)(int))dlsym((void *)-1 /* RTLD_NEXT */, "close");
+    return real_close ? real_close(fd) : -1;
+}
+DYLD_INTERPOSE(traced_close, close)

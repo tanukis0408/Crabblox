@@ -218,7 +218,9 @@ async fn handle_query(
     // 5. Direct routing for ALL core Roblox API, authentication, presence, friends, avatar, gamejoin, and economy endpoints:
     // Route to Roblox official edge Anycast load balancers immediately (<0.1ms).
     // Prevents TSPU DNS blocking in Russia, eliminating 100-second timeouts that cause RBXCRASH-HangDetected!
-    if lower_qname.ends_with(".roblox.com") || lower_qname == "roblox.com" {
+    if (lower_qname.ends_with(".roblox.com") || lower_qname == "roblox.com")
+        && lower_qname != "auth.roblox.com"
+    {
         let resp = if qtype == 1 {
             make_a_response(&query, &["128.116.13.3", "128.116.5.3", "128.116.44.3"])
         } else {

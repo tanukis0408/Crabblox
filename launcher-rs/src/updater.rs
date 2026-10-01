@@ -188,7 +188,11 @@ where
 
     // Use system unzip with -o or fallback to zip crate
     let res = std::process::Command::new("unzip")
-        .args(["-q", "-o", archive.to_str().unwrap(), "-d", unpack_path.to_str().unwrap()])
+        .arg("-q")
+        .arg("-o")
+        .arg(&archive)
+        .arg("-d")
+        .arg(unpack_path)
         .status();
 
     let new_bundle = unpack_path.join("RobloxPlayer.app");
@@ -274,7 +278,9 @@ where
     if target_bundle.exists() {
         if fs::rename(&target_bundle, &backup_path).is_err() {
             let _ = std::process::Command::new("cp")
-                .args(["-a", target_bundle.to_str().unwrap(), backup_path.to_str().unwrap()])
+                .arg("-a")
+                .arg(&target_bundle)
+                .arg(&backup_path)
                 .status();
             let _ = fs::remove_dir_all(&target_bundle);
         }
@@ -283,7 +289,9 @@ where
 
     if fs::rename(&new_bundle, &target_bundle).is_err() {
         let status = std::process::Command::new("cp")
-            .args(["-a", new_bundle.to_str().unwrap(), target_bundle.to_str().unwrap()])
+            .arg("-a")
+            .arg(&new_bundle)
+            .arg(&target_bundle)
             .status();
         if status.map(|s| !s.success()).unwrap_or(true) {
             anyhow::bail!("Failed to place new RobloxPlayer.app at {:?}", target_bundle);

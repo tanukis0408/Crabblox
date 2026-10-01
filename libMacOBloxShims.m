@@ -1608,7 +1608,13 @@ static void print_addr_info(const char* prefix, void* addr) {
     write_str("\n");
 }
 
+static volatile int macoblox_in_crash_handler = 0;
+
 static void crash_handler(int sig, void* info, void* uap) {
+    if (__sync_lock_test_and_set(&macoblox_in_crash_handler, 1)) {
+        write_str("[MacOBlox FATAL CRASH] Nested crash handler invoked, exiting immediately.\n");
+        _exit(128 + sig);
+    }
     write_str("\n\n[MacOBlox FATAL CRASH] ****************************************\n");
     write_str("[MacOBlox FATAL CRASH] Signal received: ");
     print_num(sig);
@@ -2798,7 +2804,10 @@ static int macoblox_CGWarpMouseCursorPosition(MacOBloxPoint position) {
         macoblox_pending_warp = 1;
         return 0;
     }
-    return CGWarpMouseCursorPosition(position);
+    static int (*real_warp)(MacOBloxPoint) = 0;
+    if (!real_warp)
+        real_warp = (int (*)(MacOBloxPoint))dlsym(RTLD_NEXT, "CGWarpMouseCursorPosition");
+    return real_warp ? real_warp(position) : CGWarpMouseCursorPosition(position);
 }
 DYLD_INTERPOSE(macoblox_CGWarpMouseCursorPosition, CGWarpMouseCursorPosition);
 

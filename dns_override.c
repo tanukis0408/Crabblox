@@ -249,11 +249,13 @@ static int query_forwarder(const char *node, unsigned int *addresses) {
     return found;
 }
 
+static const char macoblox_dns_sentinel[] = "MACOBLOX_DNS_ADDRINFO";
+
 #define MACOBLOX_AI_MAGIC 0x4D4F4258 /* 'MOBX' */
 struct macoblox_ai_block {
-    unsigned int magic;
     struct darwin_addrinfo entry;
     struct darwin_sockaddr_in address;
+    unsigned int magic;
 };
 
 static int is_roblox_com_domain(const char *node) {
@@ -373,10 +375,12 @@ int macoblox_dns_resolve(const char *node, const char *service, const void *hint
             block->address.family = AF_INET_DARWIN;
             block->address.port = port;
             block->address.address = addresses[i];
+            block->entry.flags = 0;
             block->entry.family = AF_INET_DARWIN;
             block->entry.socktype = socktypes[kind];
             block->entry.protocol = protocols[kind];
             block->entry.addrlen = sizeof block->address;
+            block->entry.canonname = (char *)macoblox_dns_sentinel;
             block->entry.addr = &block->address;
             if (tail) tail->next = &block->entry; else head = &block->entry;
             tail = &block->entry;
@@ -388,21 +392,29 @@ int macoblox_dns_resolve(const char *node, const char *service, const void *hint
     return 0;
 }
 
+static void (*real_freeaddrinfo)(void *) = 0;
+
 static void macoblox_freeaddrinfo(void *list) {
     if (list) {
-        struct macoblox_ai_block *first = (struct macoblox_ai_block *)((char *)list - __builtin_offsetof(struct macoblox_ai_block, entry));
-        if (first->magic == MACOBLOX_AI_MAGIC) {
+        struct darwin_addrinfo *first = (struct darwin_addrinfo *)list;
+        if (first->canonname == (char *)macoblox_dns_sentinel) {
             struct darwin_addrinfo *entry = list;
             while (entry) {
                 struct darwin_addrinfo *next = entry->next;
-                struct macoblox_ai_block *block = (struct macoblox_ai_block *)((char *)entry - __builtin_offsetof(struct macoblox_ai_block, entry));
+                struct macoblox_ai_block *block = (struct macoblox_ai_block *)entry;
                 block->magic = 0;
+                block->entry.canonname = 0;
                 free(block);
                 entry = next;
             }
             return;
         }
     }
-    freeaddrinfo(list);
+    if (!real_freeaddrinfo) {
+        extern void *dlsym(void *, const char *);
+        real_freeaddrinfo = (void (*)(void *))dlsym((void *)-1 /* RTLD_NEXT */, "freeaddrinfo");
+    }
+    if (real_freeaddrinfo)
+        real_freeaddrinfo(list);
 }
 DYLD_INTERPOSE(macoblox_freeaddrinfo, freeaddrinfo)

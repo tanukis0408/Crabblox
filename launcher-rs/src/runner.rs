@@ -85,10 +85,8 @@ impl HostAudio {
     pub fn start(cache_dir: &std::path::Path) -> Option<Self> {
         let is_pw = Self::is_pipewire_active();
 
-        // pacat connects seamlessly through pipewire-pulse / pulseaudio with rock-solid buffering.
-        let candidates = if find_binary("pacat").is_some() {
-            vec!["pacat", "pw-cat", "pw-play", "paplay"]
-        } else if is_pw {
+        // Priority depending on whether PipeWire is the active sound server
+        let candidates = if is_pw {
             vec!["pw-cat", "pw-play", "pacat", "paplay"]
         } else {
             vec!["pacat", "paplay", "pw-cat", "pw-play"]
@@ -122,7 +120,7 @@ impl HostAudio {
 
         let c_fifo = CString::new(fifo_path.to_str()?).ok()?;
         unsafe {
-            if libc::mkfifo(c_fifo.as_ptr(), 0o600) != 0 {
+            if libc::mkfifo(c_fifo.as_ptr(), 0o666) != 0 {
                 return None;
             }
         }
@@ -309,7 +307,9 @@ pub fn ensure_shim(paths: &Paths) -> anyhow::Result<()> {
         if let Some(src_path) = src {
             if !dest.exists() {
                 let _ = Command::new("cp")
-                    .args(["-r", src_path.to_str().unwrap(), dest.to_str().unwrap()])
+                    .arg("-r")
+                    .arg(&src_path)
+                    .arg(&dest)
                     .status();
             }
         }

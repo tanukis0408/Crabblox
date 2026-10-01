@@ -488,6 +488,8 @@ extern darwin_sig_t signal(int, darwin_sig_t);
 static void *unit_fifo_thread(void *context) {
     OutputUnit *unit = context;
     const char *path = getenv("MACOBLOX_AUDIO_FIFO");
+    if (!path || !unit)
+        return 0;
     /* A reader that went away must give EPIPE here, never kill the game. */
     signal(13 /* SIGPIPE */, (darwin_sig_t)1 /* SIG_IGN */);
     unsigned int block_pipe = 1u << (13 - 1); /* SIGPIPE */
@@ -531,11 +533,11 @@ static void *unit_fifo_thread(void *context) {
         unit_render(unit, block, RENDER_FRAMES);
         unsigned long done = 0;
         int retries = 0;
-        while (done < chunk) {
+        while (done < chunk && unit->producing) {
             long written = write(fd, block + done, chunk - done);
             if (written <= 0) {
                 int err = *__error();
-                if ((written == 0 || err == 4 /* EINTR */ || err == 35 /* EAGAIN */) && retries < 100) {
+                if ((written == 0 || err == 4 /* EINTR */ || err == 35 /* EAGAIN */) && retries < 100 && unit->producing) {
                     retries++;
                     usleep(500);
                     continue;
@@ -599,9 +601,8 @@ static void unit_stop(OutputUnit *unit) {
 static void *t_find(void *after, const ComponentDescription *description) {
     void *component = AudioComponentFindNext(after, description);
     if (component && description && description->type == FOURCC('a', 'u', 'o', 'u')) {
-        if (description->subtype == FOURCC('a', 'h', 'a', 'l'))
-            hal_component = component;
-        else if (description->subtype == FOURCC('d', 'e', 'f', ' '))
+        hal_component = component;
+        if (description->subtype == FOURCC('d', 'e', 'f', ' '))
             def_component = component;
     }
     if (tracing() && description) {
@@ -622,9 +623,7 @@ static int is_hal_output_component(void *component) {
     if (AudioComponentGetDescription) {
         ComponentDescription desc = {0};
         if (AudioComponentGetDescription(component, &desc) == NO_ERROR) {
-            if (desc.type == FOURCC('a', 'u', 'o', 'u') &&
-                (desc.subtype == FOURCC('a', 'h', 'a', 'l') ||
-                 desc.subtype == FOURCC('d', 'e', 'f', ' '))) {
+            if (desc.type == FOURCC('a', 'u', 'o', 'u')) {
                 return 1;
             }
         }

@@ -263,7 +263,17 @@ pub fn save_accounts(paths: &Paths, accounts: &[SavedAccount]) -> anyhow::Result
             let _ = fs::create_dir_all(parent);
             let tmp_file = parent.join(format!(".accounts.json.tmp.{}", std::process::id()));
             if fs::write(&tmp_file, &content).is_ok() {
+                if let Ok(metadata) = fs::metadata(&tmp_file) {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(0o600);
+                    let _ = fs::set_permissions(&tmp_file, perms);
+                }
                 let _ = fs::rename(&tmp_file, file);
+                if let Ok(metadata) = fs::metadata(file) {
+                    let mut perms = metadata.permissions();
+                    perms.set_mode(0o600);
+                    let _ = fs::set_permissions(file, perms);
+                }
             }
         }
     }

@@ -4,6 +4,7 @@
  * Darling's final sys_exit step, without native_exit.
  */
 extern void _exit(int);
+extern void exit(int);
 __attribute__((noreturn)) void macoblox_immediate_exit(int status) {
     __asm__ volatile("syscall" : : "a"(231L), "D"((long)status) : "rcx", "r11", "memory");
     __builtin_unreachable();
@@ -16,7 +17,8 @@ extern char *getenv(const char *);
 extern int write(int, const void *, unsigned long);
 extern int backtrace(void **, int);
 extern void backtrace_symbols_fd(void *const *, int, int);
-extern void exit(int);
+extern void *dlsym(void *, const char *);
+
 static void macoblox_traced_exit(int status) {
     const char *enabled = getenv("MACOBLOX_TRACE_EXIT");
     if (enabled && enabled[0]) {
@@ -25,7 +27,12 @@ static void macoblox_traced_exit(int status) {
         write(2, message, sizeof(message) - 1);
         backtrace_symbols_fd(frames, backtrace(frames, 48), 2);
     }
-    exit(status);
+    static void (*real_exit)(int) = 0;
+    if (!real_exit)
+        real_exit = (void (*)(int))dlsym((void *)-1 /* RTLD_NEXT */, "exit");
+    if (real_exit)
+        real_exit(status);
+    macoblox_immediate_exit(status);
 }
 __attribute__((used,section("__DATA,__interpose")))
 static const void *exit_trace_interpose[] = {(const void *)macoblox_traced_exit, (const void *)exit};
